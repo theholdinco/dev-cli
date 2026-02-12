@@ -1577,7 +1577,7 @@ cmd_status() {
   for port_info in "Frontend:$frontend" "Backend:$backend"; do
     local label="${port_info%%:*}"
     local port="${port_info##*:}"
-    if (echo >/dev/tcp/localhost/"$port") 2>/dev/null; then
+    if bash -c "echo >/dev/tcp/localhost/$port" 2>/dev/null; then
       echo -e "  $label:  :$port ${GREEN}listening${NC}"
     else
       echo -e "  $label:  :$port ${DIM}closed${NC}"

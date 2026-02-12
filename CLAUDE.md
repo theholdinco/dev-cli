@@ -46,3 +46,12 @@ To install locally after changes:
 - **Adding a new command:** Add `cmd_<name>()` function, add to the case statement at the bottom of `bin/dev`, add to `cmd_help()`, optionally add a keyboard shortcut in `bin/dev-hub`.
 - **Changing port scheme:** Modify the `BASE_*_PORT` variables and `slot_ports()` function in `bin/dev`.
 - **Adding hub features:** Edit `bin/dev-hub` — add an `action_<name>()` function, add the key handler in the main loop case statement, update the footer render.
+
+## Model Routing
+
+Before executing tasks, classify complexity:
+- ROUTINE (file ops, lookups, formatting) → Use cheapest model
+- MODERATE (code, summaries, analysis) → Use mid-tier model  
+- COMPLEX (debugging, architecture, failures) → Use premium model
+
+When spawning sub-agents, default to cheap models unless task requires more.
