@@ -1,0 +1,404 @@
+#!/usr/bin/env bash
+###############################################################################
+# dev-hub — Interactive TUI for managing agent sessions
+#
+# Launched by `dev hub`. Runs inside tmux as a persistent control center.
+#
+# Layout:
+#   ┌─────────────────────────────────────────────┐
+#   │  DEV HUB                          10:32 AM  │
+#   │                                             │
+#   │  [1] ● klyra-feat-auth     claude  :3001   │
+#   │  [2] ● klyra-fix-bug       codex   :3002   │
+#   │  [3] ○ klyra-refactor      claude  :3003   │
+#   │  [ ] ○ (slot 4 — empty)                    │
+#   │  [ ] ○ (slot 5 — empty)                    │
+#   │                                             │
+#   │  ── Preview: klyra-feat-auth ──────────     │
+#   │  > Analyzing the trading module...          │
+#   │  > Created file: src/components/Trade.tsx   │
+#   │  > Running tests...                         │
+#   │                                             │
+#   │  [1-5] switch  [n]ew  [k]ill  [p]orts      │
+#   │  [r]efresh  [l]azygit  [s]hell  [q]uit     │
+#   └─────────────────────────────────────────────┘
+###############################################################################
+
+set -euo pipefail
+
+CONFIG_DIR="$HOME/.config/dev-cli"
+PORT_REGISTRY="$CONFIG_DIR/ports.json"
+PROJECTS_DIR="$HOME/projects"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+BG_SELECT='\033[48;5;236m'
+INVERSE='\033[7m'
+
+# State
+SELECTED=1
+MAX_SLOTS=5
+PREVIEW_LINES=8
+
+# ── Helpers ─────────────────────────────────────────────────
+
+get_ip() {
+  tailscale ip -4 2>/dev/null || hostname -I | awk '{print $1}'
+}
+
+get_sessions() {
+  jq -r 'to_entries | sort_by(.value.slot) | .[].key' "$PORT_REGISTRY" 2>/dev/null
+}
+
+get_session_field() {
+  jq -r ".[\"$1\"].$2 // empty" "$PORT_REGISTRY" 2>/dev/null
+}
+
+session_at_slot() {
+  jq -r "to_entries[] | select(.value.slot == $1) | .key" "$PORT_REGISTRY" 2>/dev/null
+}
+
+session_count() {
+  jq 'length' "$PORT_REGISTRY" 2>/dev/null || echo "0"
+}
+
+# Get last N lines from a tmux session's agent pane
+get_preview() {
+  local name="$1" lines="${2:-$PREVIEW_LINES}"
+  if tmux has-session -t "$name" 2>/dev/null; then
+    tmux capture-pane -t "$name:1" -p -S -"$lines" 2>/dev/null | tail -"$lines"
+  else
+    echo -e "${DIM}(session not running)${NC}"
+  fi
+}
+
+# Check if a tmux session is alive
+is_alive() {
+  tmux has-session -t "$1" 2>/dev/null
+}
+
+# ── Render ──────────────────────────────────────────────────
+
+render() {
+  # Clear screen
+  printf '\033[2J\033[H'
+
+  local ip
+  ip=$(get_ip)
+  local now
+  now=$(date '+%H:%M')
+  local count
+  count=$(session_count)
+
+  # Header
+  echo ""
+  echo -e "  ${BOLD}${CYAN}DEV HUB${NC}                                      ${DIM}$now${NC}"
+  echo -e "  ${DIM}$count active sessions · $ip${NC}"
+  echo ""
+
+  # Session list
+  local selected_name=""
+  for slot in $(seq 1 $MAX_SLOTS); do
+    local name
+    name=$(session_at_slot "$slot")
+
+    if [ -n "$name" ]; then
+      local agent branch frontend status status_icon
+      agent=$(get_session_field "$name" "agent")
+      branch=$(get_session_field "$name" "branch")
+      frontend=$(get_session_field "$name" "ports.frontend")
+
+      if is_alive "$name"; then
+        status_icon="${GREEN}●${NC}"
+        status="running"
+      else
+        status_icon="${RED}●${NC}"
+        status="dead"
+      fi
+
+      # Truncate name for display
+      local display_name
+      display_name=$(printf "%-28s" "$name")
+
+      if [ "$slot" -eq "$SELECTED" ]; then
+        selected_name="$name"
+        echo -e "  ${BG_SELECT}${BOLD} [$slot] $status_icon $display_name ${agent}    :${frontend} ${NC}"
+      else
+        echo -e "   [$slot] $status_icon ${display_name} ${DIM}${agent}    :${frontend}${NC}"
+      fi
+    else
+      if [ "$slot" -eq "$SELECTED" ]; then
+        echo -e "  ${BG_SELECT}${DIM} [$slot] ○ (available)                                  ${NC}"
+      else
+        echo -e "   ${DIM}[$slot] ○ (available)${NC}"
+      fi
+    fi
+  done
+
+  # Preview
+  echo ""
+  if [ -n "$selected_name" ]; then
+    echo -e "  ${DIM}── Preview: ${NC}${BOLD}$selected_name${NC} ${DIM}$( printf '─%.0s' $(seq 1 $((40 - ${#selected_name}))) )${NC}"
+    echo ""
+    local preview
+    preview=$(get_preview "$selected_name")
+    while IFS= read -r line; do
+      # Indent and dim the preview
+      echo -e "  ${DIM}│${NC} $line"
+    done <<< "$preview"
+  else
+    echo -e "  ${DIM}── No session selected ──────────────────────────${NC}"
+    echo ""
+    echo -e "  ${DIM}│ Press [n] to create a new session${NC}"
+  fi
+
+  # Footer
+  echo ""
+  echo -e "  ${DIM}─────────────────────────────────────────────────${NC}"
+  echo ""
+  echo -e "  ${BOLD}[1-5]${NC} select  ${BOLD}[Enter]${NC} attach  ${BOLD}[n]${NC}ew  ${BOLD}[k]${NC}ill  ${BOLD}[p]${NC}orts"
+  echo -e "  ${BOLD}[m]${NC}erge/PR  ${BOLD}[l]${NC}azygit  ${BOLD}[s]${NC}hell  ${BOLD}[u]${NC}rl  ${BOLD}[r]${NC}efresh  ${BOLD}[q]${NC}uit"
+  echo ""
+}
+
+# ── Actions ─────────────────────────────────────────────────
+
+action_attach() {
+  local name
+  name=$(session_at_slot "$SELECTED")
+  [ -z "$name" ] && return
+
+  if is_alive "$name"; then
+    tmux switch-client -t "$name"
+  fi
+}
+
+action_new() {
+  # Check if there's a free slot
+  local free_slot=""
+  for slot in $(seq 1 $MAX_SLOTS); do
+    if [ -z "$(session_at_slot "$slot")" ]; then
+      free_slot="$slot"
+      break
+    fi
+  done
+
+  if [ -z "$free_slot" ]; then
+    echo -e "\n  ${RED}All slots are full. Kill a session first.${NC}"
+    sleep 2
+    return
+  fi
+
+  printf '\033[2J\033[H'
+  echo ""
+  echo -e "  ${BOLD}New Session${NC} (slot $free_slot)"
+  echo ""
+
+  # List available projects
+  local projects_dir="$CONFIG_DIR/projects"
+  if [ -d "$projects_dir" ] && [ -n "$(ls -A "$projects_dir" 2>/dev/null)" ]; then
+    echo -e "  ${DIM}Available projects:${NC}"
+    local i=1
+    local project_list=()
+    for config in "$projects_dir"/*.json; do
+      local pname
+      pname=$(jq -r '.name' "$config")
+      project_list+=("$pname")
+      echo "    $i) $pname"
+      i=$((i + 1))
+    done
+    echo ""
+    read -rp "  Project (name or number): " project_input
+
+    # Check if it's a number
+    if [[ "$project_input" =~ ^[0-9]+$ ]] && [ "$project_input" -le "${#project_list[@]}" ]; then
+      project_input="${project_list[$((project_input - 1))]}"
+    fi
+  else
+    read -rp "  Project name: " project_input
+  fi
+
+  [ -z "$project_input" ] && return
+
+  echo ""
+  read -rp "  Branch name (e.g. feat/my-feature): " branch_input
+  [ -z "$branch_input" ] && return
+
+  echo ""
+  echo "  Agent:"
+  echo "    1) claude (default)"
+  echo "    2) codex"
+  echo "    3) none"
+  read -rp "  Select [1]: " agent_choice
+  local agent
+  case "${agent_choice:-1}" in
+    2) agent="codex" ;;
+    3) agent="none" ;;
+    *) agent="claude" ;;
+  esac
+
+  echo ""
+  echo -e "  ${BLUE}→${NC} Creating session..."
+
+  # Run dev new in a way that we can see the output
+  dev new "$project_input" "$branch_input" --agent "$agent" 2>&1
+
+  echo ""
+  read -rp "  Press Enter to return to hub..." _
+}
+
+action_kill() {
+  local name
+  name=$(session_at_slot "$SELECTED")
+  [ -z "$name" ] && return
+
+  echo ""
+  echo -ne "  ${YELLOW}Kill session '$name'? [y/N]:${NC} "
+  read -rsn1 confirm
+  echo ""
+
+  if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+    dev kill "$name" 2>&1
+    sleep 1
+  fi
+}
+
+action_shell() {
+  local name
+  name=$(session_at_slot "$SELECTED")
+  [ -z "$name" ] && return
+
+  if is_alive "$name"; then
+    tmux switch-client -t "$name:2"
+  fi
+}
+
+action_lazygit() {
+  local name
+  name=$(session_at_slot "$SELECTED")
+  [ -z "$name" ] && return
+
+  local path
+  path=$(get_session_field "$name" "path")
+  [ -z "$path" ] && return
+
+  # Open lazygit in a temporary window in the hub session
+  tmux new-window -t hub -n "lazygit" "cd $path && lazygit"
+}
+
+action_url() {
+  local name
+  name=$(session_at_slot "$SELECTED")
+  [ -z "$name" ] && return
+
+  local ip frontend backend
+  ip=$(get_ip)
+  frontend=$(get_session_field "$name" "ports.frontend")
+  backend=$(get_session_field "$name" "ports.backend")
+
+  echo ""
+  echo -e "  ${CYAN}Frontend:${NC} http://$ip:$frontend"
+  echo -e "  ${CYAN}Backend:${NC}  http://$ip:$backend"
+  echo ""
+  read -rp "  Press Enter to continue..." _
+}
+
+action_pr() {
+  local name
+  name=$(session_at_slot "$SELECTED")
+  [ -z "$name" ] && return
+
+  printf '\033[2J\033[H'
+  echo ""
+  echo -e "  ${BOLD}Create PR for: $name${NC}"
+  echo ""
+
+  dev pr "$name" 2>&1
+
+  echo ""
+  read -rp "  Press Enter to return to hub..." _
+}
+
+action_ports() {
+  printf '\033[2J\033[H'
+  dev ports
+  echo ""
+  read -rp "  Press Enter to return to hub..." _
+}
+
+# ── Main Loop ───────────────────────────────────────────────
+
+main() {
+  # Make sure we're inside tmux
+  if [ -z "${TMUX:-}" ]; then
+    echo "Hub must run inside tmux. Use 'dev hub' to launch."
+    exit 1
+  fi
+
+  while true; do
+    render
+
+    # Read single keypress (with timeout for auto-refresh)
+    local key=""
+    read -rsn1 -t 5 key || true
+
+    case "$key" in
+      1|2|3|4|5)
+        SELECTED="$key"
+        ;;
+      "")
+        # Enter key — attach to selected session
+        action_attach
+        ;;
+      n|N)
+        action_new
+        ;;
+      k|K)
+        action_kill
+        ;;
+      s|S)
+        action_shell
+        ;;
+      l|L)
+        action_lazygit
+        ;;
+      u|U)
+        action_url
+        ;;
+      m|M)
+        action_pr
+        ;;
+      p|P)
+        action_ports
+        ;;
+      r|R)
+        # Just refresh (re-render)
+        ;;
+      q|Q)
+        printf '\033[2J\033[H'
+        exit 0
+        ;;
+      $'\x1b')
+        # Arrow keys (escape sequence)
+        read -rsn2 -t 0.1 arrow || true
+        case "$arrow" in
+          '[A') # Up
+            SELECTED=$(( SELECTED > 1 ? SELECTED - 1 : MAX_SLOTS ))
+            ;;
+          '[B') # Down
+            SELECTED=$(( SELECTED < MAX_SLOTS ? SELECTED + 1 : 1 ))
+            ;;
+        esac
+        ;;
+    esac
+  done
+}
+
+main "$@"
