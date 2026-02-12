@@ -167,6 +167,29 @@ get_session_field() {
   jq -r ".[\"$name\"].$field // empty" "$PORT_REGISTRY"
 }
 
+# Convert ISO timestamp to human-readable age (2m, 3h, 5d, 2w)
+human_readable_age() {
+  local created="$1"
+  local now
+  now=$(date +%s)
+  local then
+  # Handle both GNU and BSD date
+  then=$(date -d "$created" +%s 2>/dev/null || date -jf "%Y-%m-%dT%H:%M:%S" "${created%%+*}" +%s 2>/dev/null || echo "$now")
+  local diff=$(( now - then ))
+
+  if [ "$diff" -lt 60 ]; then
+    echo "${diff}s"
+  elif [ "$diff" -lt 3600 ]; then
+    echo "$(( diff / 60 ))m"
+  elif [ "$diff" -lt 86400 ]; then
+    echo "$(( diff / 3600 ))h"
+  elif [ "$diff" -lt 604800 ]; then
+    echo "$(( diff / 86400 ))d"
+  else
+    echo "$(( diff / 604800 ))w"
+  fi
+}
+
 # ── Env File Generation ────────────────────────────────────────────────────
 
 generate_env_local() {
@@ -851,10 +874,10 @@ cmd_ls() {
 
   # Header
   printf "\n"
-  printf "  ${BOLD}%-30s %-8s %-8s %-8s %-10s %-8s${NC}\n" \
-    "SESSION" "AGENT" "FRONT" "BACK" "BRANCH" "STATUS"
-  printf "  ${DIM}%-30s %-8s %-8s %-8s %-10s %-8s${NC}\n" \
-    "──────────────────────────────" "────────" "────────" "────────" "──────────" "────────"
+  printf "  ${BOLD}%-30s %-8s %-8s %-8s %-10s %-6s %-8s${NC}\n" \
+    "SESSION" "AGENT" "FRONT" "BACK" "BRANCH" "AGE" "STATUS"
+  printf "  ${DIM}%-30s %-8s %-8s %-8s %-10s %-6s %-8s${NC}\n" \
+    "──────────────────────────────" "────────" "────────" "────────" "──────────" "──────" "────────"
 
   while IFS= read -r name; do
     local agent branch frontend backend
@@ -862,6 +885,10 @@ cmd_ls() {
     branch=$(get_session_field "$name" "branch")
     frontend=$(get_session_field "$name" "ports.frontend")
     backend=$(get_session_field "$name" "ports.backend")
+
+    local created age
+    created=$(get_session_field "$name" "created")
+    age=$(human_readable_age "$created")
 
     # Check if tmux session is alive
     local status
@@ -875,8 +902,8 @@ cmd_ls() {
     local branch_display
     branch_display=$(echo "$branch" | cut -c1-10)
 
-    printf "  %-30s %-8s %-8s %-8s %-10s " \
-      "$name" "$agent" ":$frontend" ":$backend" "$branch_display"
+    printf "  %-30s %-8s %-8s %-8s %-10s %-6s " \
+      "$name" "$agent" ":$frontend" ":$backend" "$branch_display" "$age"
     echo -e "$status"
   done <<< "$sessions"
 
@@ -920,8 +947,73 @@ cmd_attach() {
 }
 
 cmd_kill() {
-  local name="${2:-}"
-  [ -z "$name" ] && die "Usage: dev kill <session>"
+  # Handle --all and --project flags
+  local kill_all=false kill_project=""
+  local args=("$@")
+  local positional=()
+  for arg in "${args[@]}"; do
+    case "$arg" in
+      --all) kill_all=true ;;
+      --project) kill_project="__NEXT__" ;;
+      --project=*) kill_project="${arg#*=}" ;;
+      *)
+        if [ "$kill_project" = "__NEXT__" ]; then
+          kill_project="$arg"
+        else
+          positional+=("$arg")
+        fi
+        ;;
+    esac
+  done
+
+  if [ "$kill_all" = true ]; then
+    local sessions
+    sessions=$(jq -r 'keys[]' "$PORT_REGISTRY" 2>/dev/null)
+    if [ -z "$sessions" ]; then
+      echo "No sessions to kill."
+      return 0
+    fi
+    echo ""
+    echo -e "  ${YELLOW}Kill ALL sessions?${NC}"
+    echo ""
+    while IFS= read -r s; do
+      echo "    $s"
+    done <<< "$sessions"
+    echo ""
+    echo -ne "  ${YELLOW}Confirm? [y/N]:${NC} "
+    read -r confirm
+    [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || { echo "  Cancelled."; return 0; }
+    while IFS= read -r s; do
+      cmd_kill "kill" "$s"
+    done <<< "$sessions"
+    return 0
+  fi
+
+  if [ -n "$kill_project" ] && [ "$kill_project" != "__NEXT__" ]; then
+    local sessions
+    sessions=$(jq -r "to_entries[] | select(.value.project == \"$kill_project\") | .key" "$PORT_REGISTRY" 2>/dev/null)
+    if [ -z "$sessions" ]; then
+      echo "No sessions for project '$kill_project'."
+      return 0
+    fi
+    echo ""
+    echo -e "  ${YELLOW}Kill all sessions for project '$kill_project'?${NC}"
+    echo ""
+    while IFS= read -r s; do
+      echo "    $s"
+    done <<< "$sessions"
+    echo ""
+    echo -ne "  ${YELLOW}Confirm? [y/N]:${NC} "
+    read -r confirm
+    [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || { echo "  Cancelled."; return 0; }
+    while IFS= read -r s; do
+      cmd_kill "kill" "$s"
+    done <<< "$sessions"
+    return 0
+  fi
+
+  local name="${positional[1]:-}"
+  [ -z "$name" ] && die "Usage: dev kill <session> [--all] [--project <name>]"
 
   # Support partial matching
   local match
@@ -929,7 +1021,6 @@ cmd_kill() {
 
   if [ -z "$match" ]; then
     warn "Session '$name' not found in registry"
-    # Try killing tmux session directly anyway
     tmux kill-session -t "$name" 2>/dev/null && log "Killed tmux session '$name'" || true
     return 0
   fi
@@ -1319,6 +1410,392 @@ cmd_worktree() {
   cmd_new "new" "$project" "$branch" "--agent" "none"
 }
 
+cmd_diff() {
+  local name="${2:-}"
+  [ -z "$name" ] && die "Usage: dev diff <session> [--full]"
+
+  local match
+  match=$(jq -r "keys[] | select(contains(\"$name\"))" "$PORT_REGISTRY" | head -1)
+  [ -z "$match" ] && die "No session matching '$name'"
+
+  local worktree_path
+  worktree_path=$(get_session_field "$match" "path")
+
+  local full=false
+  shift 2 || true
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --full) full=true; shift ;;
+      *) shift ;;
+    esac
+  done
+
+  if [ "$full" = true ]; then
+    git -C "$worktree_path" diff
+  else
+    git -C "$worktree_path" diff --stat
+  fi
+}
+
+cmd_send() {
+  local name="${2:-}"
+  [ -z "$name" ] && die "Usage: dev send <session> <prompt> [--file <path>]"
+
+  local match
+  match=$(jq -r "keys[] | select(contains(\"$name\"))" "$PORT_REGISTRY" | head -1)
+  [ -z "$match" ] && die "No session matching '$name'"
+
+  shift 2 || true
+  local prompt="" file=""
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --file) file="${2:-}"; shift 2 ;;
+      --file=*) file="${1#*=}"; shift ;;
+      *) prompt+="${prompt:+ }$1"; shift ;;
+    esac
+  done
+
+  if [ -n "$file" ]; then
+    [ -f "$file" ] || die "File not found: $file"
+    prompt=$(cat "$file")
+  fi
+
+  [ -z "$prompt" ] && die "No prompt provided. Usage: dev send <session> <prompt>"
+
+  tmux send-keys -t "$match:1" "$prompt" Enter
+  log "Sent to $match"
+}
+
+cmd_sync() {
+  local name="${2:-}"
+  [ -z "$name" ] && die "Usage: dev sync <session>"
+
+  local match
+  match=$(jq -r "keys[] | select(contains(\"$name\"))" "$PORT_REGISTRY" | head -1)
+  [ -z "$match" ] && die "No session matching '$name'"
+
+  local worktree_path project
+  worktree_path=$(get_session_field "$match" "path")
+  project=$(get_session_field "$match" "project")
+  local bare_dir="$PROJECTS_DIR/$project"
+
+  # Detect base branch (same logic as cmd_pr)
+  local base_branch
+  base_branch=$(cd "$bare_dir" && git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo "main")
+
+  info "Syncing $match with origin/$base_branch..."
+  cd "$worktree_path"
+  git fetch origin
+  git rebase "origin/$base_branch"
+  log "Synced with origin/$base_branch"
+}
+
+cmd_template() {
+  local project="${2:-}"
+  [ -z "$project" ] && die "Usage: dev template <project>"
+
+  local editor="${EDITOR:-nano}"
+
+  # Check for hook first (monorepo)
+  local hook="$CONFIG_DIR/hooks/$project/setup.sh"
+  if [ -f "$hook" ]; then
+    info "Opening hook: $hook"
+    $editor "$hook"
+    return
+  fi
+
+  # Check for env template
+  local template="$CONFIG_DIR/templates/${project}.env"
+  if [ -f "$template" ]; then
+    info "Opening template: $template"
+    $editor "$template"
+    return
+  fi
+
+  die "No hook or template found for project '$project'.\n  Expected: $hook\n       or: $template"
+}
+
+cmd_status() {
+  local name="${2:-}"
+  [ -z "$name" ] && die "Usage: dev status <session>"
+
+  local match
+  match=$(jq -r "keys[] | select(contains(\"$name\"))" "$PORT_REGISTRY" | head -1)
+  [ -z "$match" ] && die "No session matching '$name'"
+
+  local worktree_path project branch agent created frontend backend
+  worktree_path=$(get_session_field "$match" "path")
+  project=$(get_session_field "$match" "project")
+  branch=$(get_session_field "$match" "branch")
+  agent=$(get_session_field "$match" "agent")
+  created=$(get_session_field "$match" "created")
+  frontend=$(get_session_field "$match" "ports.frontend")
+  backend=$(get_session_field "$match" "ports.backend")
+
+  local age
+  age=$(human_readable_age "$created")
+
+  echo ""
+  echo -e "  ${BOLD}$match${NC}"
+  echo ""
+
+  # Tmux status
+  if tmux has-session -t "$match" 2>/dev/null; then
+    echo -e "  Tmux:     ${GREEN}alive${NC}"
+  else
+    echo -e "  Tmux:     ${RED}dead${NC}"
+  fi
+
+  echo -e "  Agent:    $agent"
+  echo -e "  Branch:   $branch"
+  echo -e "  Age:      $age"
+  echo -e "  Path:     $worktree_path"
+  echo ""
+
+  # Git status
+  if [ -d "$worktree_path" ]; then
+    local dirty
+    dirty=$(git -C "$worktree_path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    echo -e "  ${BOLD}Git${NC}"
+    echo -e "  Dirty:    $dirty files"
+    git -C "$worktree_path" diff --stat 2>/dev/null | sed 's/^/  /'
+
+    # Ahead/behind
+    local upstream
+    upstream=$(git -C "$worktree_path" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || echo "")
+    if [ -n "$upstream" ]; then
+      local ahead behind
+      ahead=$(git -C "$worktree_path" rev-list --count '@{upstream}..HEAD' 2>/dev/null || echo "0")
+      behind=$(git -C "$worktree_path" rev-list --count 'HEAD..@{upstream}' 2>/dev/null || echo "0")
+      echo -e "  Ahead:    $ahead  Behind: $behind"
+    fi
+    echo ""
+  fi
+
+  # Port checks
+  echo -e "  ${BOLD}Ports${NC}"
+  for port_info in "Frontend:$frontend" "Backend:$backend"; do
+    local label="${port_info%%:*}"
+    local port="${port_info##*:}"
+    if (echo >/dev/tcp/localhost/"$port") 2>/dev/null; then
+      echo -e "  $label:  :$port ${GREEN}listening${NC}"
+    else
+      echo -e "  $label:  :$port ${DIM}closed${NC}"
+    fi
+  done
+  echo ""
+}
+
+cmd_gc() {
+  ensure_dirs
+  local sessions
+  sessions=$(jq -r 'keys[]' "$PORT_REGISTRY" 2>/dev/null)
+
+  if [ -z "$sessions" ]; then
+    echo "No sessions to clean up."
+    return 0
+  fi
+
+  # Find dead sessions (tmux gone)
+  local dead=()
+  while IFS= read -r name; do
+    if ! tmux has-session -t "$name" 2>/dev/null; then
+      dead+=("$name")
+    fi
+  done <<< "$sessions"
+
+  if [ ${#dead[@]} -eq 0 ]; then
+    log "No dead sessions found. All clean!"
+    return 0
+  fi
+
+  echo ""
+  echo -e "  ${BOLD}Dead sessions:${NC}"
+  echo ""
+  for name in "${dead[@]}"; do
+    local created age branch
+    created=$(get_session_field "$name" "created")
+    age=$(human_readable_age "$created")
+    branch=$(get_session_field "$name" "branch")
+    echo -e "  ${RED}●${NC} $name  ${DIM}($branch, $age old)${NC}"
+  done
+
+  echo ""
+  echo -ne "  ${YELLOW}Remove ${#dead[@]} dead session(s)? [y/N]:${NC} "
+  read -r confirm
+  [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || { echo "  Cancelled."; return 0; }
+
+  for name in "${dead[@]}"; do
+    info "Cleaning up $name..."
+    local worktree_path project
+    worktree_path=$(get_session_field "$name" "path")
+    project=$(get_session_field "$name" "project")
+    local bare_dir="$PROJECTS_DIR/$project"
+
+    # Remove worktree
+    if [ -d "$worktree_path" ] && [ -d "$bare_dir" ]; then
+      cd "$bare_dir"
+      git worktree remove "$worktree_path" --force 2>/dev/null || {
+        rm -rf "$worktree_path"
+        git worktree prune
+      }
+    fi
+
+    # Unregister
+    unregister_session "$name"
+    log "Removed $name"
+  done
+
+  echo ""
+  log "Garbage collection complete. Removed ${#dead[@]} session(s)."
+}
+
+cmd_doctor() {
+  echo ""
+  echo -e "  ${BOLD}dev doctor${NC} — System Health Check"
+  echo ""
+
+  local ok=0 warn_count=0 fail=0
+
+  # Check required tools
+  echo -e "  ${BOLD}Tools${NC}"
+  for tool in jq tmux git gh; do
+    if command -v "$tool" &>/dev/null; then
+      echo -e "  ${GREEN}✓${NC} $tool $(command -v "$tool")"
+      ok=$((ok + 1))
+    else
+      echo -e "  ${RED}✗${NC} $tool — NOT FOUND"
+      fail=$((fail + 1))
+    fi
+  done
+
+  # Check optional tools
+  for tool in docker tailscale lazygit delta; do
+    if command -v "$tool" &>/dev/null; then
+      echo -e "  ${GREEN}✓${NC} $tool $(command -v "$tool")"
+      ok=$((ok + 1))
+    else
+      echo -e "  ${YELLOW}○${NC} $tool — not installed (optional)"
+      warn_count=$((warn_count + 1))
+    fi
+  done
+  echo ""
+
+  # Docker daemon
+  echo -e "  ${BOLD}Services${NC}"
+  if command -v docker &>/dev/null; then
+    if docker info &>/dev/null; then
+      echo -e "  ${GREEN}✓${NC} Docker daemon running"
+      ok=$((ok + 1))
+    else
+      echo -e "  ${RED}✗${NC} Docker installed but daemon not running"
+      fail=$((fail + 1))
+    fi
+  fi
+  echo ""
+
+  # Secrets file
+  echo -e "  ${BOLD}Config${NC}"
+  if [ -f "$CONFIG_DIR/secrets.env" ]; then
+    local perms
+    perms=$(stat -c '%a' "$CONFIG_DIR/secrets.env" 2>/dev/null || stat -f '%Lp' "$CONFIG_DIR/secrets.env" 2>/dev/null || echo "unknown")
+    if [ "$perms" = "600" ]; then
+      echo -e "  ${GREEN}✓${NC} secrets.env (perms: $perms)"
+      ok=$((ok + 1))
+    else
+      echo -e "  ${YELLOW}!${NC} secrets.env (perms: $perms — should be 600)"
+      warn_count=$((warn_count + 1))
+    fi
+  else
+    echo -e "  ${YELLOW}○${NC} secrets.env — not found"
+    warn_count=$((warn_count + 1))
+  fi
+
+  # Port registry
+  if [ -f "$PORT_REGISTRY" ]; then
+    if jq empty "$PORT_REGISTRY" 2>/dev/null; then
+      echo -e "  ${GREEN}✓${NC} ports.json — valid JSON"
+      ok=$((ok + 1))
+    else
+      echo -e "  ${RED}✗${NC} ports.json — invalid JSON!"
+      fail=$((fail + 1))
+    fi
+  else
+    echo -e "  ${YELLOW}○${NC} ports.json — not found"
+    warn_count=$((warn_count + 1))
+  fi
+  echo ""
+
+  # Session/tmux consistency
+  echo -e "  ${BOLD}Sessions${NC}"
+  local sessions
+  sessions=$(jq -r 'keys[]' "$PORT_REGISTRY" 2>/dev/null)
+  if [ -n "$sessions" ]; then
+    local total=0 alive=0 dead=0
+    while IFS= read -r name; do
+      total=$((total + 1))
+      if tmux has-session -t "$name" 2>/dev/null; then
+        alive=$((alive + 1))
+      else
+        dead=$((dead + 1))
+      fi
+    done <<< "$sessions"
+    echo -e "  Total: $total  Alive: ${GREEN}$alive${NC}  Dead: ${RED}$dead${NC}"
+    if [ "$dead" -gt 0 ]; then
+      echo -e "  ${YELLOW}!${NC} Run 'dev gc' to clean up dead sessions"
+      warn_count=$((warn_count + 1))
+    fi
+  else
+    echo -e "  ${DIM}No sessions registered${NC}"
+  fi
+  echo ""
+
+  # Summary
+  echo -e "  ─────────────────────────────────"
+  echo -e "  ${GREEN}$ok passed${NC}  ${YELLOW}$warn_count warnings${NC}  ${RED}$fail failed${NC}"
+  echo ""
+}
+
+cmd_restart() {
+  local name="${2:-}"
+  [ -z "$name" ] && die "Usage: dev restart <session>"
+
+  local match
+  match=$(jq -r "keys[] | select(contains(\"$name\"))" "$PORT_REGISTRY" | head -1)
+  [ -z "$match" ] && die "No session matching '$name'"
+
+  local worktree_path agent
+  worktree_path=$(get_session_field "$match" "path")
+  agent=$(get_session_field "$match" "agent")
+
+  info "Restarting session '$match'..."
+
+  # Kill existing tmux session
+  tmux kill-session -t "$match" 2>/dev/null || true
+
+  # Source secrets
+  local env_prefix=""
+  if [ -f "$SECRETS_FILE" ]; then
+    env_prefix="source $SECRETS_FILE && "
+  fi
+
+  # Recreate tmux session with same agent
+  local agent_cmd
+  case "$agent" in
+    claude) agent_cmd="cd $worktree_path && claude" ;;
+    codex)  agent_cmd="cd $worktree_path && codex" ;;
+    none)   agent_cmd="cd $worktree_path && echo 'Ready. No agent started.' && bash" ;;
+    *)      agent_cmd="cd $worktree_path && bash" ;;
+  esac
+
+  tmux new-session -d -s "$match" -n "agent" "${env_prefix}${agent_cmd}"
+  tmux new-window -t "$match" -n "shell" "cd $worktree_path && bash"
+  tmux new-window -t "$match" -n "server" "cd $worktree_path && echo 'Run your dev server here' && bash"
+  tmux select-window -t "$match:1"
+
+  log "Session '$match' restarted with $agent"
+}
+
 cmd_img() {
   local subcmd="${2:-ls}"
   local IMAGES_DIR="$HOME/images"
@@ -1502,6 +1979,15 @@ cmd_help() {
     dev ls                                  List all active sessions
     dev attach [session]                    Attach to tmux session (interactive picker if no arg)
     dev kill <session>                      Stop agent + remove worktree + free ports
+    dev kill --all                          Kill all sessions
+    dev kill --project <name>               Kill all sessions for a project
+    dev restart <session>                   Restart tmux + agent (keep worktree)
+    dev status <session>                    Show detailed session health
+    dev send <session> <prompt>             Send text to agent pane
+    dev send <session> --file <path>        Send file contents to agent
+    dev diff <session>                      Show git diff --stat for session
+    dev diff <session> --full               Show full git diff
+    dev sync <session>                      Rebase session on upstream base branch
     dev hub                                 Interactive TUI control center
     dev dashboard                           Split-pane view of all agents (read-only)
 
@@ -1530,6 +2016,11 @@ cmd_help() {
     dev img grab <url>                      Download image from URL
     dev img path [filename]                 Print full path (latest if omitted)
     dev img clean [days]                    Remove old images (default: 7 days)
+
+  MAINTENANCE
+    dev gc                                  Clean up dead sessions
+    dev doctor                              System health check
+    dev template <project>                  Edit project hook/template
 
   EXAMPLES
     dev init                                 # interactive setup for new project
@@ -1574,6 +2065,14 @@ case "${1:-help}" in
   worktree)  cmd_worktree "$@" ;;
   projects)  cmd_projects ;;
   update)    cmd_update ;;
+  status)    cmd_status "$@" ;;
+  restart)   cmd_restart "$@" ;;
+  send)      cmd_send "$@" ;;
+  diff)      cmd_diff "$@" ;;
+  sync)      cmd_sync "$@" ;;
+  gc)        cmd_gc ;;
+  template)  cmd_template "$@" ;;
+  doctor)    cmd_doctor ;;
   help|-h|--help) cmd_help ;;
   *)         die "Unknown command: $1. Run 'dev help' for usage." ;;
 esac

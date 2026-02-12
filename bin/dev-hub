@@ -84,6 +84,55 @@ is_alive() {
   tmux has-session -t "$1" 2>/dev/null
 }
 
+# Convert ISO timestamp to human-readable age (2m, 3h, 5d, 2w)
+human_readable_age() {
+  local created="$1"
+  local now
+  now=$(date +%s)
+  local then
+  then=$(date -d "$created" +%s 2>/dev/null || date -jf "%Y-%m-%dT%H:%M:%S" "${created%%+*}" +%s 2>/dev/null || echo "$now")
+  local diff=$(( now - then ))
+
+  if [ "$diff" -lt 60 ]; then
+    echo "${diff}s"
+  elif [ "$diff" -lt 3600 ]; then
+    echo "$(( diff / 60 ))m"
+  elif [ "$diff" -lt 86400 ]; then
+    echo "$(( diff / 3600 ))h"
+  elif [ "$diff" -lt 604800 ]; then
+    echo "$(( diff / 86400 ))d"
+  else
+    echo "$(( diff / 604800 ))w"
+  fi
+}
+
+# Get git status summary: [3 dirty, 2↑]
+get_git_info() {
+  local path="$1"
+  [ -d "$path" ] || return
+
+  local parts=()
+
+  # Dirty file count
+  local dirty
+  dirty=$(git -C "$path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$dirty" -gt 0 ]; then
+    parts+=("${dirty} dirty")
+  fi
+
+  # Ahead count
+  local ahead
+  ahead=$(git -C "$path" rev-list --count '@{upstream}..HEAD' 2>/dev/null || echo "0")
+  if [ "$ahead" -gt 0 ]; then
+    parts+=("${ahead}↑")
+  fi
+
+  if [ ${#parts[@]} -gt 0 ]; then
+    local IFS=', '
+    echo "[${parts[*]}]"
+  fi
+}
+
 # ── Render ──────────────────────────────────────────────────
 
 render() {
@@ -115,6 +164,13 @@ render() {
       branch=$(get_session_field "$name" "branch")
       frontend=$(get_session_field "$name" "ports.frontend")
 
+      local created age git_info
+      created=$(get_session_field "$name" "created")
+      age=$(human_readable_age "$created")
+      local wt_path
+      wt_path=$(get_session_field "$name" "path")
+      git_info=$(get_git_info "$wt_path")
+
       if is_alive "$name"; then
         status_icon="${GREEN}●${NC}"
         status="running"
@@ -129,9 +185,9 @@ render() {
 
       if [ "$slot" -eq "$SELECTED" ]; then
         selected_name="$name"
-        echo -e "  ${BG_SELECT}${BOLD} [$slot] $status_icon $display_name ${agent}    :${frontend} ${NC}"
+        echo -e "  ${BG_SELECT}${BOLD} [$slot] $status_icon $display_name ${agent}  :${frontend}  ${DIM}${age}${NC}${BG_SELECT} ${git_info:-} ${NC}"
       else
-        echo -e "   [$slot] $status_icon ${display_name} ${DIM}${agent}    :${frontend}${NC}"
+        echo -e "   [$slot] $status_icon ${display_name} ${DIM}${agent}  :${frontend}  ${age} ${git_info:-}${NC}"
       fi
     else
       if [ "$slot" -eq "$SELECTED" ]; then
@@ -163,8 +219,8 @@ render() {
   echo ""
   echo -e "  ${DIM}─────────────────────────────────────────────────${NC}"
   echo ""
-  echo -e "  ${BOLD}[1-5]${NC} select  ${BOLD}[Enter]${NC} attach  ${BOLD}[n]${NC}ew  ${BOLD}[k]${NC}ill  ${BOLD}[p]${NC}orts"
-  echo -e "  ${BOLD}[m]${NC}erge/PR  ${BOLD}[l]${NC}azygit  ${BOLD}[s]${NC}hell  ${BOLD}[u]${NC}rl  ${BOLD}[r]${NC}efresh  ${BOLD}[q]${NC}uit"
+  echo -e "  ${BOLD}[1-5]${NC} select  ${BOLD}[Enter]${NC} attach  ${BOLD}[n]${NC}ew  ${BOLD}[k]${NC}ill  ${BOLD}[p]${NC}orts  ${BOLD}[d]${NC}iff"
+  echo -e "  ${BOLD}[m]${NC}erge/PR  ${BOLD}[l]${NC}azygit  ${BOLD}[s]${NC}hell  ${BOLD}[u]${NC}rl  ${BOLD}[i]${NC}nfo  ${BOLD}[r]${NC}efresh  ${BOLD}[q]${NC}uit"
   echo ""
 }
 
@@ -333,6 +389,85 @@ action_ports() {
   read -rp "  Press Enter to return to hub..." _
 }
 
+action_diff() {
+  local name
+  name=$(session_at_slot "$SELECTED")
+  [ -z "$name" ] && return
+
+  local path
+  path=$(get_session_field "$name" "path")
+  [ -z "$path" ] && return
+
+  # Use delta if available, otherwise plain diff
+  local diff_cmd="git diff"
+  if command -v delta &>/dev/null; then
+    diff_cmd="git diff | delta"
+  fi
+
+  tmux new-window -t hub -n "diff" "cd $path && $diff_cmd; echo ''; echo 'Press Enter to close...'; read"
+}
+
+action_info() {
+  local name
+  name=$(session_at_slot "$SELECTED")
+  [ -z "$name" ] && return
+
+  local path project branch agent created frontend backend
+  path=$(get_session_field "$name" "path")
+  project=$(get_session_field "$name" "project")
+  branch=$(get_session_field "$name" "branch")
+  agent=$(get_session_field "$name" "agent")
+  created=$(get_session_field "$name" "created")
+  frontend=$(get_session_field "$name" "ports.frontend")
+  backend=$(get_session_field "$name" "ports.backend")
+  local age
+  age=$(human_readable_age "$created")
+
+  printf '\033[2J\033[H'
+  echo ""
+  echo -e "  ${BOLD}Session Info: $name${NC}"
+  echo ""
+  echo -e "  Project:    $project"
+  echo -e "  Branch:     $branch"
+  echo -e "  Agent:      $agent"
+  echo -e "  Age:        $age"
+  echo -e "  Path:       $path"
+  echo -e "  Frontend:   :$frontend"
+  echo -e "  Backend:    :$backend"
+  echo ""
+
+  if [ -d "$path" ]; then
+    echo -e "  ${BOLD}Git${NC}"
+    local dirty
+    dirty=$(git -C "$path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    echo -e "  Dirty files: $dirty"
+
+    local file_count
+    file_count=$(git -C "$path" ls-files 2>/dev/null | wc -l | tr -d ' ')
+    echo -e "  Tracked:     $file_count files"
+
+    echo ""
+    echo -e "  ${BOLD}Recent commits${NC}"
+    git -C "$path" log --oneline -5 2>/dev/null | sed 's/^/  /'
+    echo ""
+
+    # Port checks
+    echo -e "  ${BOLD}Ports${NC}"
+    for port_info in "Frontend:$frontend" "Backend:$backend"; do
+      local label="${port_info%%:*}"
+      local port="${port_info##*:}"
+      if (echo >/dev/tcp/localhost/"$port") 2>/dev/null; then
+        echo -e "  $label:  :$port ${GREEN}listening${NC}"
+      else
+        echo -e "  $label:  :$port ${DIM}closed${NC}"
+      fi
+    done
+  fi
+
+  echo ""
+  read -rp "  Press Enter to return to hub..." _
+}
+
 # ── Main Loop ───────────────────────────────────────────────
 
 main() {
@@ -377,6 +512,12 @@ main() {
         ;;
       p|P)
         action_ports
+        ;;
+      d|D)
+        action_diff
+        ;;
+      i|I)
+        action_info
         ;;
       r|R)
         # Just refresh (re-render)

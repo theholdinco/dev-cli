@@ -101,6 +101,95 @@ if [ ! -f "$CONFIG_DIR/ports.json" ]; then
   log "Created port registry"
 fi
 
+# Generate tab completion
+info "Setting up tab completion..."
+COMPLETION_FILE="$CONFIG_DIR/completion.bash"
+cat > "$COMPLETION_FILE" << 'COMPLETION'
+# dev-cli tab completion
+_dev() {
+  local cur prev commands session_cmds project_cmds
+  COMPREPLY=()
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+  # All available commands
+  commands="init setup new ls attach kill hub dashboard ports logs url supabase pr shell worktree img projects update help status restart send diff sync gc template doctor"
+
+  # Commands that take a session name as argument
+  session_cmds="attach kill logs url shell pr status restart send diff sync"
+
+  # Commands that take a project name as argument
+  project_cmds="new setup template worktree"
+
+  # First argument: complete command names
+  if [ "$COMP_CWORD" -eq 1 ]; then
+    COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+    return 0
+  fi
+
+  # Second argument: depends on the command
+  local cmd="${COMP_WORDS[1]}"
+
+  # Session name completion
+  if echo " $session_cmds " | grep -q " $cmd "; then
+    local sessions
+    sessions=$(jq -r 'keys[]' "$HOME/.config/dev-cli/ports.json" 2>/dev/null)
+    if [ -n "$sessions" ]; then
+      COMPREPLY=( $(compgen -W "$sessions" -- "$cur") )
+    fi
+    return 0
+  fi
+
+  # Project name completion
+  if echo " $project_cmds " | grep -q " $cmd "; then
+    local projects=""
+    if [ -d "$HOME/.config/dev-cli/projects" ]; then
+      projects=$(ls "$HOME/.config/dev-cli/projects/" 2>/dev/null | sed 's/\.json$//')
+    fi
+    if [ -n "$projects" ]; then
+      COMPREPLY=( $(compgen -W "$projects" -- "$cur") )
+    fi
+    return 0
+  fi
+
+  # Supabase subcommands
+  if [ "$cmd" = "supabase" ] && [ "$COMP_CWORD" -eq 3 ]; then
+    COMPREPLY=( $(compgen -W "start stop reset status" -- "$cur") )
+    return 0
+  fi
+
+  # img subcommands
+  if [ "$cmd" = "img" ] && [ "$COMP_CWORD" -eq 2 ]; then
+    COMPREPLY=( $(compgen -W "ls cp grab path clean" -- "$cur") )
+    return 0
+  fi
+
+  # kill flags
+  if [ "$cmd" = "kill" ]; then
+    COMPREPLY=( $(compgen -W "--all --project" -- "$cur") )
+    return 0
+  fi
+
+  return 0
+}
+
+complete -F _dev dev
+COMPLETION
+log "Generated tab completion at $COMPLETION_FILE"
+
+# Source completion from shell rc files (idempotent)
+COMPLETION_MARKER="# dev-cli completion"
+for rcfile in ~/.bashrc ~/.zshrc; do
+  if [ -f "$rcfile" ] && ! grep -q "$COMPLETION_MARKER" "$rcfile"; then
+    cat >> "$rcfile" << COMP_SOURCE
+
+$COMPLETION_MARKER
+[ -f "$CONFIG_DIR/completion.bash" ] && source "$CONFIG_DIR/completion.bash"
+COMP_SOURCE
+    log "Added completion source to $rcfile"
+  fi
+done
+
 echo ""
 log "dev-cli installed!"
 echo ""
