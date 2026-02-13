@@ -827,13 +827,23 @@ cmd_new() {
       ;;
   esac
 
+  # Set port env vars on tmux session so all windows/panes inherit them.
+  # This is critical: frameworks like Next.js read PORT from the shell
+  # environment for server binding, NOT from .env.local files.
   tmux new-session -d -s "$name" -n "agent" "${env_prefix}${agent_cmd}"
+  tmux set-environment -t "$name" PORT "$wt_frontend"
+  tmux set-environment -t "$name" DEV_FRONTEND_PORT "$wt_frontend"
+  tmux set-environment -t "$name" DEV_BACKEND_PORT "$wt_backend"
+  tmux set-environment -t "$name" DEV_SUPA_API_PORT "$wt_supa_api"
+  tmux set-environment -t "$name" DEV_SUPA_DB_PORT "$wt_supa_db"
+  tmux set-environment -t "$name" DEV_SUPA_STUDIO_PORT "$wt_supa_studio"
+  tmux set-environment -t "$name" DEV_SLOT "$slot"
 
   # Add a second window for manual shell access
   tmux new-window -t "$name" -n "shell" "cd $worktree_path && bash"
 
   # Add a third window for dev server (not started automatically)
-  tmux new-window -t "$name" -n "server" "cd $worktree_path && echo 'Run your dev server here (e.g., npm run dev)' && bash"
+  tmux new-window -t "$name" -n "server" "cd $worktree_path && echo 'Frontend port: $wt_frontend | Backend port: $wt_backend — run: npm run dev' && bash"
 
   # Select the agent window
   tmux select-window -t "$name:1"
@@ -1788,9 +1798,25 @@ cmd_restart() {
     *)      agent_cmd="cd $worktree_path && bash" ;;
   esac
 
+  # Read port info from registry
+  local slot frontend backend supa_api supa_db supa_studio
+  slot=$(get_session_field "$match" "slot")
+  frontend=$(get_session_field "$match" "ports.frontend")
+  backend=$(get_session_field "$match" "ports.backend")
+  supa_api=$(get_session_field "$match" "ports.supa_api")
+  supa_db=$(get_session_field "$match" "ports.supa_db")
+  supa_studio=$(get_session_field "$match" "ports.supa_studio")
+
   tmux new-session -d -s "$match" -n "agent" "${env_prefix}${agent_cmd}"
+  tmux set-environment -t "$match" PORT "$frontend"
+  tmux set-environment -t "$match" DEV_FRONTEND_PORT "$frontend"
+  tmux set-environment -t "$match" DEV_BACKEND_PORT "$backend"
+  tmux set-environment -t "$match" DEV_SUPA_API_PORT "$supa_api"
+  tmux set-environment -t "$match" DEV_SUPA_DB_PORT "$supa_db"
+  tmux set-environment -t "$match" DEV_SUPA_STUDIO_PORT "$supa_studio"
+  tmux set-environment -t "$match" DEV_SLOT "$slot"
   tmux new-window -t "$match" -n "shell" "cd $worktree_path && bash"
-  tmux new-window -t "$match" -n "server" "cd $worktree_path && echo 'Run your dev server here' && bash"
+  tmux new-window -t "$match" -n "server" "cd $worktree_path && echo 'Frontend port: $frontend | Backend port: $backend — run: npm run dev' && bash"
   tmux select-window -t "$match:1"
 
   log "Session '$match' restarted with $agent"
