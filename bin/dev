@@ -828,10 +828,9 @@ cmd_new() {
   esac
 
   # Set port env vars on tmux session so all windows/panes inherit them.
-  # This is critical: frameworks like Next.js read PORT from the shell
-  # environment for server binding, NOT from .env.local files.
+  # We use DEV_* prefixed vars (not PORT) to avoid overriding per-package
+  # .env files — monorepo packages each set their own PORT via .env.
   tmux new-session -d -s "$name" -n "agent" "${env_prefix}${agent_cmd}"
-  tmux set-environment -t "$name" PORT "$wt_frontend"
   tmux set-environment -t "$name" DEV_FRONTEND_PORT "$wt_frontend"
   tmux set-environment -t "$name" DEV_BACKEND_PORT "$wt_backend"
   tmux set-environment -t "$name" DEV_SUPA_API_PORT "$wt_supa_api"
@@ -1808,7 +1807,6 @@ cmd_restart() {
   supa_studio=$(get_session_field "$match" "ports.supa_studio")
 
   tmux new-session -d -s "$match" -n "agent" "${env_prefix}${agent_cmd}"
-  tmux set-environment -t "$match" PORT "$frontend"
   tmux set-environment -t "$match" DEV_FRONTEND_PORT "$frontend"
   tmux set-environment -t "$match" DEV_BACKEND_PORT "$backend"
   tmux set-environment -t "$match" DEV_SUPA_API_PORT "$supa_api"
