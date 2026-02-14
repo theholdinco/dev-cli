@@ -46,6 +46,26 @@ mv "$BIN_DIR/dev.new" "$BIN_DIR/dev"
 mv "$BIN_DIR/dev-hub.new" "$BIN_DIR/dev-hub"
 log "Installed dev and dev-hub to $BIN_DIR/"
 
+# Check recommended dependencies
+info "Checking dependencies..."
+_missing=0
+for _tool in lazygit:https://github.com/jesseduffield/lazygit \
+             delta:https://github.com/dandavison/delta \
+             docker:https://docs.docker.com/get-docker/ \
+             tailscale:https://tailscale.com/download; do
+  _name="${_tool%%:*}"
+  _url="${_tool#*:}"
+  if ! command -v "$_name" &>/dev/null; then
+    warn "$_name not found — install: $_url"
+    _missing=$((_missing + 1))
+  fi
+done
+if [ "$_missing" -gt 0 ]; then
+  info "Run ./bootstrap.sh for automatic installation of missing tools"
+else
+  log "All dependencies found"
+fi
+
 # Ensure PATH includes ~/.local/bin
 if ! echo "$PATH" | grep -q "$BIN_DIR"; then
   for rcfile in ~/.bashrc ~/.zshrc; do
