@@ -1852,24 +1852,13 @@ cmd_doctor() {
 
   # Check required tools
   echo -e "  ${BOLD}Tools${NC}"
-  for tool in jq tmux git gh; do
+  for tool in jq tmux git gh lazygit delta docker tailscale; do
     if command -v "$tool" &>/dev/null; then
       echo -e "  ${GREEN}✓${NC} $tool $(command -v "$tool")"
       ok=$((ok + 1))
     else
       echo -e "  ${RED}✗${NC} $tool — NOT FOUND"
       fail=$((fail + 1))
-    fi
-  done
-
-  # Check optional tools
-  for tool in docker tailscale lazygit delta; do
-    if command -v "$tool" &>/dev/null; then
-      echo -e "  ${GREEN}✓${NC} $tool $(command -v "$tool")"
-      ok=$((ok + 1))
-    else
-      echo -e "  ${YELLOW}○${NC} $tool — not installed (optional)"
-      warn_count=$((warn_count + 1))
     fi
   done
   echo ""
