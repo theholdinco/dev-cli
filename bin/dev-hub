@@ -263,7 +263,13 @@ render() {
       idx=$((idx + 1))
 
       local agent branch frontend owner status_icon
-      agent=$(get_session_field "$name" "agent")
+      # Show all agents (handles both old "agent" string and new "agents" array)
+      agent=$(jq -r ".[\"$name\"].agents // null" "$PORT_REGISTRY" 2>/dev/null)
+      if [ "$agent" != "null" ] && [ -n "$agent" ]; then
+        agent=$(jq -r ".[\"$name\"].agents | join(\",\")" "$PORT_REGISTRY" 2>/dev/null)
+      else
+        agent=$(get_session_field "$name" "agent")
+      fi
       branch=$(get_session_field "$name" "branch")
       frontend=$(get_session_field "$name" "ports.frontend")
       owner=$(get_session_field "$name" "owner")
@@ -321,7 +327,7 @@ render() {
   echo ""
   echo -e "  ${DIM}─────────────────────────────────────────────────${NC}"
   echo ""
-  echo -e "  ${BOLD}[↑↓]${NC} select  ${BOLD}[Enter]${NC} attach  ${BOLD}[${KEY_NEW}]${NC}ew  ${BOLD}[${KEY_KILL}]${NC}ill  ${BOLD}[p]${NC}orts  ${BOLD}[d]${NC}iff"
+  echo -e "  ${BOLD}[↑↓]${NC} select  ${BOLD}[Enter]${NC} attach  ${BOLD}[${KEY_NEW}]${NC}ew  ${BOLD}[${KEY_KILL}]${NC}ill  ${BOLD}[p]${NC}orts  ${BOLD}[d]${NC}iff  ${BOLD}[+]${NC} add agent"
   echo -e "  ${BOLD}[m]${NC}erge/PR  ${BOLD}[${KEY_LAZYGIT}]${NC}azygit  ${BOLD}[s]${NC}hell  ${BOLD}[u]${NC}rl  ${BOLD}[i]${NC}nfo  ${BOLD}[a]${NC}ll  ${BOLD}[r]${NC}efresh  ${BOLD}[q]${NC}uit"
   echo ""
 }
@@ -395,23 +401,25 @@ action_new() {
   [ -z "$branch_input" ] && return
 
   echo ""
-  echo "  Agent:"
+  echo "  Agent(s):"
   echo "    1) claude (default)"
   echo "    2) codex"
-  echo "    3) none"
+  echo "    3) claude + codex (dual)"
+  echo "    4) none"
   read -rp "  Select [1]: " agent_choice
-  local agent
+  local agent agent_flag
   case "${agent_choice:-1}" in
-    2) agent="codex" ;;
-    3) agent="none" ;;
-    *) agent="claude" ;;
+    2) agent="codex"; agent_flag="--agent" ;;
+    3) agent="claude,codex"; agent_flag="--agents" ;;
+    4) agent="none"; agent_flag="--agent" ;;
+    *) agent="claude"; agent_flag="--agent" ;;
   esac
 
   echo ""
   echo -e "  ${BLUE}→${NC} Creating session..."
 
   # Run dev new in a way that we can see the output
-  dev new "$project_input" "$branch_input" --agent "$agent" 2>&1
+  dev new "$project_input" "$branch_input" "$agent_flag" "$agent" 2>&1
 
   echo ""
   read -rp "  Press Enter to return to hub..." _
@@ -523,7 +531,13 @@ action_info() {
   path=$(get_session_field "$name" "path")
   project=$(get_session_field "$name" "project")
   branch=$(get_session_field "$name" "branch")
-  agent=$(get_session_field "$name" "agent")
+  # Show all agents (handles both old "agent" string and new "agents" array)
+  agent=$(jq -r ".[\"$name\"].agents // null" "$PORT_REGISTRY" 2>/dev/null)
+  if [ "$agent" != "null" ] && [ -n "$agent" ]; then
+    agent=$(jq -r ".[\"$name\"].agents | join(\",\")" "$PORT_REGISTRY" 2>/dev/null)
+  else
+    agent=$(get_session_field "$name" "agent")
+  fi
   created=$(get_session_field "$name" "created")
   frontend=$(get_session_field "$name" "ports.frontend")
   backend=$(get_session_field "$name" "ports.backend")
@@ -539,7 +553,7 @@ action_info() {
   echo -e "  Owner:      $owner"
   echo -e "  Project:    $project"
   echo -e "  Branch:     $branch"
-  echo -e "  Agent:      $agent"
+  echo -e "  Agent(s):   $agent"
   echo -e "  Age:        $age"
   echo -e "  Path:       $path"
   echo -e "  Frontend:   :$frontend"
@@ -573,6 +587,33 @@ action_info() {
       fi
     done
   fi
+
+  echo ""
+  read -rp "  Press Enter to return to hub..." _
+}
+
+action_add_agent() {
+  local name
+  name=$(selected_session_name)
+  [ -z "$name" ] && return
+
+  echo ""
+  echo -e "  ${BOLD}Add agent to: $name${NC}"
+  echo ""
+  echo "    1) claude"
+  echo "    2) codex"
+  echo ""
+  read -rp "  Select agent type [1]: " agent_choice
+  local agent_type
+  case "${agent_choice:-1}" in
+    2) agent_type="codex" ;;
+    *) agent_type="claude" ;;
+  esac
+
+  echo ""
+  echo -e "  ${BLUE}→${NC} Adding $agent_type agent..."
+
+  dev agent add "$name" "$agent_type" 2>&1
 
   echo ""
   read -rp "  Press Enter to return to hub..." _
@@ -643,6 +684,9 @@ main() {
         ;;
       i|I)
         action_info
+        ;;
+      +)
+        action_add_agent
         ;;
       r|R)
         # Just refresh (re-render)
