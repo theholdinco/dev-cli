@@ -140,10 +140,11 @@ create_tmux_windows() {
     if [ "$win_name" = "agent" ]; then
       resolved_cmd="${env_prefix}${agent_cmd}"
     elif [ "$win_name" = "server" ]; then
+      local port_exports="export DEV_FRONTEND_PORT=$frontend DEV_BACKEND_PORT=$backend DEV_SLOT=${session##*-}"
       if [ -n "$run_cmd" ]; then
-        resolved_cmd="cd $worktree && echo 'Frontend: http://$ip:$frontend | Backend: http://$ip:$backend' && echo 'Running: $run_cmd' && echo '─────────────────────────────────────' && $run_cmd; bash"
+        resolved_cmd="$port_exports && cd $worktree && echo 'Frontend: http://$ip:$frontend | Backend: http://$ip:$backend' && echo 'Running: $run_cmd' && echo '─────────────────────────────────────' && $run_cmd; bash"
       else
-        resolved_cmd="cd $worktree && echo 'Frontend: http://$ip:$frontend | Backend: http://$ip:$backend' && echo 'Run your dev server here.' && bash"
+        resolved_cmd="$port_exports && cd $worktree && echo 'Frontend: http://$ip:$frontend | Backend: http://$ip:$backend' && echo 'Run your dev server here.' && bash"
       fi
     elif [ -n "$win_command" ]; then
       resolved_cmd="cd $worktree && $win_command"
