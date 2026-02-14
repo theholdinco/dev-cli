@@ -115,6 +115,10 @@ register_session() {
   ports=$(slot_ports "$slot")
   read -r frontend backend supa_api supa_db supa_studio <<< "$ports"
 
+  # Build agents JSON array from comma-separated agent string (e.g. "claude,codex")
+  local agents_json
+  agents_json=$(echo "$agent" | tr ',' '\n' | jq -R . | jq -s .)
+
   local tmp
   tmp=$(mktemp)
   jq --arg name "$name" \
@@ -122,6 +126,7 @@ register_session() {
      --arg branch "$branch" \
      --argjson slot "$slot" \
      --arg agent "$agent" \
+     --argjson agents "$agents_json" \
      --arg path "$worktree_path" \
      --arg owner "$USER" \
      --argjson frontend "$frontend" \
@@ -135,6 +140,7 @@ register_session() {
         branch: $branch,
         slot: $slot,
         agent: $agent,
+        agents: $agents,
         path: $path,
         owner: $owner,
         ports: {
@@ -190,6 +196,30 @@ human_readable_age() {
   else
     echo "$(( diff / 604800 ))w"
   fi
+}
+
+# Get agents list from registry (handles both old "agent" string and new "agents" array)
+# Returns comma-separated list: "claude" or "claude,codex"
+get_session_agents() {
+  local name="$1"
+  local agents_array
+  agents_array=$(jq -r ".[\"$name\"].agents // null" "$PORT_REGISTRY" 2>/dev/null)
+  if [ "$agents_array" != "null" ] && [ -n "$agents_array" ]; then
+    # New format: agents array
+    jq -r ".[\"$name\"].agents | join(\",\")" "$PORT_REGISTRY" 2>/dev/null
+  else
+    # Old format: single agent string
+    jq -r ".[\"$name\"].agent // empty" "$PORT_REGISTRY" 2>/dev/null
+  fi
+}
+
+# Check if a specific agent type is running in a session
+# Returns 0 (true) if agent is present, 1 (false) otherwise
+has_agent() {
+  local name="$1" agent_type="$2"
+  local agents
+  agents=$(get_session_agents "$name")
+  echo "$agents" | tr ',' '\n' | grep -qx "$agent_type"
 }
 
 # ── Env File Generation ────────────────────────────────────────────────────
@@ -709,7 +739,7 @@ cmd_setup() {
 }
 
 cmd_new() {
-  local project="${2:-}" branch="${3:-}" agent="claude" run_cmd=""
+  local project="${2:-}" branch="${3:-}" agent="" agents_flag="" run_cmd=""
   shift 2 || true
 
   # Parse options
@@ -717,14 +747,33 @@ cmd_new() {
     case "${1:-}" in
       --agent) agent="${2:-claude}"; shift 2 ;;
       --agent=*) agent="${1#*=}"; shift ;;
+      --agents) agents_flag="${2:-}"; shift 2 ;;
+      --agents=*) agents_flag="${1#*=}"; shift ;;
       --run) run_cmd="${2:-}"; shift 2 ;;
       --run=*) run_cmd="${1#*=}"; shift ;;
       *) shift ;;
     esac
   done
 
-  [ -z "$project" ] && die "Usage: dev new <project> <branch> [--agent claude|codex]"
-  [ -z "$branch" ] && die "Usage: dev new <project> <branch> [--agent claude|codex]"
+  # Resolve agent(s): --agents flag > --agent flag > project config defaults > "claude"
+  if [ -n "$agents_flag" ]; then
+    agent="$agents_flag"
+  elif [ -z "$agent" ]; then
+    if [ -n "$project" ] && [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
+      local config_agents
+      config_agents=$(jq -r '.defaults.agents // empty' "$CONFIG_DIR/projects/${project}.json" 2>/dev/null)
+      if [ -n "$config_agents" ]; then
+        agent="$config_agents"
+      else
+        agent="claude"
+      fi
+    else
+      agent="claude"
+    fi
+  fi
+
+  [ -z "$project" ] && die "Usage: dev new <project> <branch> [--agent claude|codex] [--agents claude,codex]"
+  [ -z "$branch" ] && die "Usage: dev new <project> <branch> [--agent claude|codex] [--agents claude,codex]"
 
   local bare_dir="$PROJECTS_DIR/$project"
   local wt_dir="$PROJECTS_DIR/${project}-worktrees"
@@ -839,10 +888,14 @@ cmd_new() {
     env_prefix="source $SECRETS_FILE && "
   fi
 
-  # Create tmux session with the agent
+  # Create tmux session with agent(s)
+  # Parse comma-separated agents list
+  local primary_agent
+  primary_agent=$(echo "$agent" | cut -d',' -f1)
   info "Starting tmux session '$name' with $agent..."
+
   local agent_cmd
-  case "$agent" in
+  case "$primary_agent" in
     claude)
       agent_cmd="cd $worktree_path && claude"
       ;;
@@ -853,7 +906,7 @@ cmd_new() {
       agent_cmd="cd $worktree_path && echo 'Ready. No agent started.' && bash"
       ;;
     *)
-      die "Unknown agent: $agent. Use claude, codex, or none."
+      die "Unknown agent: $primary_agent. Use claude, codex, or none."
       ;;
   esac
 
@@ -864,6 +917,24 @@ cmd_new() {
   ip=$(get_ip)
 
   tmux new-session -d -s "$name" -n "agent" "${env_prefix}${agent_cmd}"
+
+  # Create additional agent windows for dual-agent mode
+  local IFS_BAK="$IFS"
+  IFS=',' read -ra agent_list <<< "$agent"
+  IFS="$IFS_BAK"
+  if [ ${#agent_list[@]} -gt 1 ]; then
+    for extra_agent in "${agent_list[@]:1}"; do
+      local extra_cmd
+      case "$extra_agent" in
+        claude) extra_cmd="cd $worktree_path && claude" ;;
+        codex)  extra_cmd="cd $worktree_path && codex" ;;
+        *)      warn "Unknown agent '$extra_agent', skipping"; continue ;;
+      esac
+      tmux new-window -t "$name" -n "agent-${extra_agent}" "${env_prefix}${extra_cmd}"
+      info "Added agent window: agent-${extra_agent}"
+    done
+  fi
+
   tmux set-environment -t "$name" DEV_FRONTEND_PORT "$wt_frontend"
   tmux set-environment -t "$name" DEV_BACKEND_PORT "$wt_backend"
   tmux set-environment -t "$name" DEV_SUPA_API_PORT "$wt_supa_api"
@@ -871,12 +942,11 @@ cmd_new() {
   tmux set-environment -t "$name" DEV_SUPA_STUDIO_PORT "$wt_supa_studio"
   tmux set-environment -t "$name" DEV_SLOT "$slot"
 
-  # Add a second window for manual shell access
+  # Add a window for manual shell access
   tmux new-window -t "$name" -n "shell" "cd $worktree_path && bash"
 
-  # Add a third window for dev server
+  # Add a window for dev server
   if [ -n "$run_cmd" ]; then
-    # Auto-start the dev server with the configured command
     tmux new-window -t "$name" -n "server" "cd $worktree_path && echo 'Frontend: http://$ip:$wt_frontend | Backend: http://$ip:$wt_backend' && echo 'Running: $run_cmd' && echo '─────────────────────────────────────' && $run_cmd; bash"
   else
     tmux new-window -t "$name" -n "server" "cd $worktree_path && echo 'Frontend: http://$ip:$wt_frontend | Backend: http://$ip:$wt_backend' && echo 'Run: pnpm dev (backend reads PORT from .env, frontend may need: PORT=$wt_frontend pnpm dev:frontend)' && bash"
@@ -892,7 +962,7 @@ cmd_new() {
   log "Session '$name' is running!"
   echo ""
   echo -e "  ${BOLD}Session:${NC}  $name"
-  echo -e "  ${BOLD}Agent:${NC}    $agent"
+  echo -e "  ${BOLD}Agent(s):${NC} $agent"
   echo -e "  ${BOLD}Branch:${NC}   $branch"
   echo -e "  ${BOLD}Path:${NC}     $worktree_path"
   echo -e "  ${BOLD}Frontend:${NC} http://$ip:$frontend"
@@ -945,14 +1015,14 @@ cmd_ls() {
     echo -e "  ${DIM}$USER's sessions ($total_count/$MAX_SLOTS total slots used)${NC}"
   fi
   printf "\n"
-  printf "  ${BOLD}%-30s %-10s %-8s %-8s %-8s %-10s %-6s %-8s${NC}\n" \
-    "SESSION" "OWNER" "AGENT" "FRONT" "BACK" "BRANCH" "AGE" "STATUS"
-  printf "  ${DIM}%-30s %-10s %-8s %-8s %-8s %-10s %-6s %-8s${NC}\n" \
-    "──────────────────────────────" "──────────" "────────" "────────" "────────" "──────────" "──────" "────────"
+  printf "  ${BOLD}%-30s %-10s %-14s %-8s %-8s %-10s %-6s %-8s${NC}\n" \
+    "SESSION" "OWNER" "AGENT(S)" "FRONT" "BACK" "BRANCH" "AGE" "STATUS"
+  printf "  ${DIM}%-30s %-10s %-14s %-8s %-8s %-10s %-6s %-8s${NC}\n" \
+    "──────────────────────────────" "──────────" "──────────────" "────────" "────────" "──────────" "──────" "────────"
 
   while IFS= read -r name; do
     local agent branch frontend backend owner
-    agent=$(get_session_field "$name" "agent")
+    agent=$(get_session_agents "$name")
     branch=$(get_session_field "$name" "branch")
     frontend=$(get_session_field "$name" "ports.frontend")
     backend=$(get_session_field "$name" "ports.backend")
@@ -975,7 +1045,7 @@ cmd_ls() {
     local branch_display
     branch_display=$(echo "$branch" | cut -c1-10)
 
-    printf "  %-30s %-10s %-8s %-8s %-8s %-10s %-6s " \
+    printf "  %-30s %-10s %-14s %-8s %-8s %-10s %-6s " \
       "$name" "$owner" "$agent" ":$frontend" ":$backend" "$branch_display" "$age"
     echo -e "$status"
   done <<< "$sessions"
@@ -1630,11 +1700,11 @@ cmd_status() {
   match=$(jq -r "keys[] | select(contains(\"$name\"))" "$PORT_REGISTRY" | head -1)
   [ -z "$match" ] && die "No session matching '$name'"
 
-  local worktree_path project branch agent created frontend backend
+  local worktree_path project branch agents created frontend backend
   worktree_path=$(get_session_field "$match" "path")
   project=$(get_session_field "$match" "project")
   branch=$(get_session_field "$match" "branch")
-  agent=$(get_session_field "$match" "agent")
+  agents=$(get_session_agents "$match")
   created=$(get_session_field "$match" "created")
   frontend=$(get_session_field "$match" "ports.frontend")
   backend=$(get_session_field "$match" "ports.backend")
@@ -1653,7 +1723,7 @@ cmd_status() {
     echo -e "  Tmux:     ${RED}dead${NC}"
   fi
 
-  echo -e "  Agent:    $agent"
+  echo -e "  Agent(s): $agents"
   echo -e "  Branch:   $branch"
   echo -e "  Age:      $age"
   echo -e "  Path:     $worktree_path"
@@ -1919,9 +1989,9 @@ cmd_restart() {
   match=$(jq -r "keys[] | select(contains(\"$name\"))" "$PORT_REGISTRY" | head -1)
   [ -z "$match" ] && die "No session matching '$name'"
 
-  local worktree_path agent
+  local worktree_path agents
   worktree_path=$(get_session_field "$match" "path")
-  agent=$(get_session_field "$match" "agent")
+  agents=$(get_session_agents "$match")
 
   info "Restarting session '$match'..."
 
@@ -1934,9 +2004,13 @@ cmd_restart() {
     env_prefix="source $SECRETS_FILE && "
   fi
 
-  # Recreate tmux session with same agent
+  # Parse agents list and determine primary agent
+  local primary_agent
+  primary_agent=$(echo "$agents" | cut -d',' -f1)
+
+  # Recreate tmux session with primary agent
   local agent_cmd
-  case "$agent" in
+  case "$primary_agent" in
     claude) agent_cmd="cd $worktree_path && claude" ;;
     codex)  agent_cmd="cd $worktree_path && codex" ;;
     none)   agent_cmd="cd $worktree_path && echo 'Ready. No agent started.' && bash" ;;
@@ -1952,7 +2026,28 @@ cmd_restart() {
   supa_db=$(get_session_field "$match" "ports.supa_db")
   supa_studio=$(get_session_field "$match" "ports.supa_studio")
 
+  # Resolve project name and run command from project config
+  local project
+  project=$(get_session_field "$match" "project")
+
   tmux new-session -d -s "$match" -n "agent" "${env_prefix}${agent_cmd}"
+
+  # Create additional agent windows for dual-agent mode
+  local IFS_BAK="$IFS"
+  IFS=',' read -ra agent_list <<< "$agents"
+  IFS="$IFS_BAK"
+  if [ ${#agent_list[@]} -gt 1 ]; then
+    for extra_agent in "${agent_list[@]:1}"; do
+      local extra_cmd
+      case "$extra_agent" in
+        claude) extra_cmd="cd $worktree_path && claude" ;;
+        codex)  extra_cmd="cd $worktree_path && codex" ;;
+        *)      warn "Unknown agent '$extra_agent', skipping"; continue ;;
+      esac
+      tmux new-window -t "$match" -n "agent-${extra_agent}" "${env_prefix}${extra_cmd}"
+    done
+  fi
+
   tmux set-environment -t "$match" DEV_FRONTEND_PORT "$frontend"
   tmux set-environment -t "$match" DEV_BACKEND_PORT "$backend"
   tmux set-environment -t "$match" DEV_SUPA_API_PORT "$supa_api"
@@ -1960,9 +2055,9 @@ cmd_restart() {
   tmux set-environment -t "$match" DEV_SUPA_STUDIO_PORT "$supa_studio"
   tmux set-environment -t "$match" DEV_SLOT "$slot"
   tmux new-window -t "$match" -n "shell" "cd $worktree_path && bash"
-  # Resolve run command from project config
+
   local run_cmd=""
-  if [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
+  if [ -n "$project" ] && [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
     run_cmd=$(jq -r '.run_cmd // empty' "$CONFIG_DIR/projects/${project}.json")
   fi
 
@@ -1973,7 +2068,7 @@ cmd_restart() {
   fi
   tmux select-window -t "$match:1"
 
-  log "Session '$match' restarted with $agent"
+  log "Session '$match' restarted with $agents"
 }
 
 cmd_img() {
@@ -2151,6 +2246,161 @@ cmd_update() {
   log "Updated to latest version"
 }
 
+cmd_agent() {
+  local subcmd="${2:-}"
+  [ -z "$subcmd" ] && die "Usage: dev agent <add|remove|list> <session> [claude|codex]"
+
+  case "$subcmd" in
+    add)
+      local session_name="${3:-}" agent_type="${4:-}"
+      [ -z "$session_name" ] && die "Usage: dev agent add <session> <claude|codex>"
+      [ -z "$agent_type" ] && die "Usage: dev agent add <session> <claude|codex>"
+
+      # Validate agent type
+      case "$agent_type" in
+        claude|codex) ;;
+        *) die "Unknown agent type: $agent_type. Use claude or codex." ;;
+      esac
+
+      # Find session (partial matching)
+      local match
+      match=$(jq -r "keys[] | select(contains(\"$session_name\"))" "$PORT_REGISTRY" | head -1)
+      [ -z "$match" ] && die "No session matching '$session_name'"
+
+      # Check if agent type already running
+      if has_agent "$match" "$agent_type"; then
+        die "Agent '$agent_type' is already running in session '$match'"
+      fi
+
+      # Check if tmux session is alive
+      tmux has-session -t "$match" 2>/dev/null || die "Session '$match' is not running"
+
+      local worktree_path
+      worktree_path=$(get_session_field "$match" "path")
+
+      # Source secrets
+      local env_prefix=""
+      if [ -f "$SECRETS_FILE" ]; then
+        env_prefix="source $SECRETS_FILE && "
+      fi
+
+      # Build agent command
+      local agent_cmd
+      case "$agent_type" in
+        claude) agent_cmd="cd $worktree_path && claude" ;;
+        codex)  agent_cmd="cd $worktree_path && codex" ;;
+      esac
+
+      # Create new tmux window named agent-<type>
+      tmux new-window -t "$match" -n "agent-${agent_type}" "${env_prefix}${agent_cmd}"
+
+      # Update port registry to include new agent in agents array
+      local tmp
+      tmp=$(mktemp)
+      jq --arg name "$match" --arg agent_type "$agent_type" \
+        '(.[$name].agents // [.[$name].agent]) as $current |
+         .[$name].agents = ($current + [$agent_type] | unique)' \
+        "$PORT_REGISTRY" > "$tmp"
+      mv "$tmp" "$PORT_REGISTRY"
+
+      log "Added $agent_type agent to session '$match'"
+      ;;
+
+    remove|rm)
+      local session_name="${3:-}" agent_type="${4:-}"
+      [ -z "$session_name" ] && die "Usage: dev agent remove <session> <claude|codex>"
+      [ -z "$agent_type" ] && die "Usage: dev agent remove <session> <claude|codex>"
+
+      # Find session (partial matching)
+      local match
+      match=$(jq -r "keys[] | select(contains(\"$session_name\"))" "$PORT_REGISTRY" | head -1)
+      [ -z "$match" ] && die "No session matching '$session_name'"
+
+      # Check if agent is in the session
+      if ! has_agent "$match" "$agent_type"; then
+        die "Agent '$agent_type' is not running in session '$match'"
+      fi
+
+      # Kill the specific tmux window (agent-<type>)
+      tmux kill-window -t "$match:agent-${agent_type}" 2>/dev/null || \
+        tmux kill-window -t "$match:agent" 2>/dev/null || \
+        warn "Could not find tmux window for agent-${agent_type}"
+
+      # Update port registry agents array
+      local tmp
+      tmp=$(mktemp)
+      jq --arg name "$match" --arg agent_type "$agent_type" \
+        '(.[$name].agents // [.[$name].agent]) as $current |
+         .[$name].agents = ($current | map(select(. != $agent_type)))' \
+        "$PORT_REGISTRY" > "$tmp"
+      mv "$tmp" "$PORT_REGISTRY"
+
+      log "Removed $agent_type agent from session '$match'"
+      ;;
+
+    list|ls)
+      local session_name="${3:-}"
+      [ -z "$session_name" ] && die "Usage: dev agent list <session>"
+
+      # Find session (partial matching)
+      local match
+      match=$(jq -r "keys[] | select(contains(\"$session_name\"))" "$PORT_REGISTRY" | head -1)
+      [ -z "$match" ] && die "No session matching '$session_name'"
+
+      local agents
+      agents=$(get_session_agents "$match")
+
+      echo ""
+      echo -e "  ${BOLD}Agents for: $match${NC}"
+      echo ""
+
+      # List agents from registry
+      local IFS_BAK="$IFS"
+      IFS=',' read -ra agent_arr <<< "$agents"
+      IFS="$IFS_BAK"
+      for a in "${agent_arr[@]}"; do
+        # Check if corresponding tmux window exists
+        local window_name
+        if [ "$a" = "$(echo "$agents" | cut -d',' -f1)" ]; then
+          window_name="agent"
+        else
+          window_name="agent-${a}"
+        fi
+        if tmux has-session -t "$match" 2>/dev/null && tmux list-windows -t "$match" -F '#{window_name}' 2>/dev/null | grep -qx "$window_name"; then
+          echo -e "  ${GREEN}●${NC} $a  ${DIM}(window: $window_name)${NC}"
+        else
+          echo -e "  ${RED}●${NC} $a  ${DIM}(window not found)${NC}"
+        fi
+      done
+
+      # Also list any agent tmux windows not tracked in registry
+      if tmux has-session -t "$match" 2>/dev/null; then
+        local tmux_windows
+        tmux_windows=$(tmux list-windows -t "$match" -F '#{window_name}' 2>/dev/null | grep '^agent' || true)
+        if [ -n "$tmux_windows" ]; then
+          while IFS= read -r win; do
+            local tracked=false
+            for a in "${agent_arr[@]}"; do
+              if [ "$win" = "agent" ] || [ "$win" = "agent-${a}" ]; then
+                tracked=true
+                break
+              fi
+            done
+            if [ "$tracked" = false ]; then
+              echo -e "  ${YELLOW}●${NC} ${win}  ${DIM}(untracked tmux window)${NC}"
+            fi
+          done <<< "$tmux_windows"
+        fi
+      fi
+      echo ""
+      ;;
+
+    *)
+      die "Unknown agent subcommand: $subcmd. Use add, remove, or list."
+      ;;
+  esac
+}
+
 cmd_help() {
   cat << 'HELPEOF'
 
@@ -2164,8 +2414,9 @@ cmd_help() {
     dev help                                Show this help
 
   SESSIONS
-    dev new <project> <branch> [--agent claude|codex|none] [--run "<cmd>"]
-                                            Create worktree + start agent
+    dev new <project> <branch> [--agent claude|codex|none] [--agents claude,codex] [--run "<cmd>"]
+                                            Create worktree + start agent(s)
+                                            --agents starts multiple agents (comma-separated)
                                             --run auto-starts a command in the server window
     dev ls                                  List your active sessions
     dev ls --all                              List all users' sessions
@@ -2182,6 +2433,12 @@ cmd_help() {
     dev sync <session>                      Rebase session on upstream base branch
     dev hub                                 Interactive TUI control center
     dev dashboard                           Split-pane view of all agents (read-only)
+
+  AGENTS (dual agent support)
+    dev agent add <session> <claude|codex>  Add a second agent to a running session
+    dev agent remove <session> <claude|codex>
+                                            Remove an agent from a session
+    dev agent list <session>                List running agents in a session
 
   FINISH & MERGE
     dev pr <session>                        Push, create PR, optionally kill session
@@ -2229,7 +2486,8 @@ cmd_help() {
     dev init                                 # interactive setup for new project
     dev setup klyra git@github.com:org/klyra.git
     dev new klyra feat/trading-ui --agent claude
-    dev new klyra fix/auth-bug --agent codex
+    dev new klyra fix/auth-bug --agents claude,codex
+    dev agent add klyra-feat-trading-ui codex
     dev ls
     dev attach klyra-feat-trading-ui
     dev kill klyra-fix-auth-bug
@@ -2275,6 +2533,7 @@ case "${1:-help}" in
   sync)      cmd_sync "$@" ;;
   gc)        cmd_gc ;;
   template)  cmd_template "$@" ;;
+  agent)     cmd_agent "$@" ;;
   doctor)    cmd_doctor ;;
   help|-h|--help) cmd_help ;;
   *)         die "Unknown command: $1. Run 'dev help' for usage." ;;
