@@ -1743,6 +1743,54 @@ cmd_doctor() {
   fi
   echo ""
 
+  # Auth checks
+  echo -e "  ${BOLD}Auth${NC}"
+
+  # GitHub CLI
+  if command -v gh &>/dev/null; then
+    if gh auth status &>/dev/null; then
+      local gh_user
+      gh_user=$(gh api user -q '.login' 2>/dev/null || echo "authenticated")
+      echo -e "  ${GREEN}✓${NC} GitHub — $gh_user"
+      ok=$((ok + 1))
+    else
+      echo -e "  ${RED}✗${NC} GitHub — not authenticated (run: gh auth login)"
+      fail=$((fail + 1))
+    fi
+  else
+    echo -e "  ${RED}✗${NC} GitHub — gh not installed"
+    fail=$((fail + 1))
+  fi
+
+  # Claude Code
+  if command -v claude &>/dev/null; then
+    if claude auth status &>/dev/null 2>&1; then
+      echo -e "  ${GREEN}✓${NC} Claude Code — authenticated"
+      ok=$((ok + 1))
+    else
+      echo -e "  ${YELLOW}○${NC} Claude Code — not authenticated (run: claude login)"
+      warn_count=$((warn_count + 1))
+    fi
+  else
+    echo -e "  ${YELLOW}○${NC} Claude Code — not installed"
+    warn_count=$((warn_count + 1))
+  fi
+
+  # Codex
+  if command -v codex &>/dev/null; then
+    if [ -n "${OPENAI_API_KEY:-}" ]; then
+      echo -e "  ${GREEN}✓${NC} Codex — API key set"
+      ok=$((ok + 1))
+    else
+      echo -e "  ${YELLOW}○${NC} Codex — no API key (run: codex login or set OPENAI_API_KEY)"
+      warn_count=$((warn_count + 1))
+    fi
+  else
+    echo -e "  ${YELLOW}○${NC} Codex — not installed"
+    warn_count=$((warn_count + 1))
+  fi
+  echo ""
+
   # Secrets file
   echo -e "  ${BOLD}Config${NC}"
   if [ -f "$CONFIG_DIR/secrets.env" ]; then

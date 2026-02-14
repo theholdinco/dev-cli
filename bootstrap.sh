@@ -43,8 +43,38 @@ echo "  Multi-Agent Dev Environment Bootstrap"
 echo "============================================"
 echo ""
 
+# Homebrew and nvm can't install as root
+if [ "$(id -u)" -eq 0 ]; then
+  err "Don't run bootstrap.sh as root!"
+  echo ""
+  echo "  Create a user first, then run as that user:"
+  echo "    adduser <username>"
+  echo "    usermod -aG sudo <username>"
+  echo "    su - <username>"
+  echo "    cd /opt/dev-cli && ./bootstrap.sh"
+  echo ""
+  exit 1
+fi
+
 # ---------------------------------------------------------------------------
-# 1. System packages
+# 1. GitHub CLI (needed early for cloning private repos)
+# ---------------------------------------------------------------------------
+if command -v gh &>/dev/null; then
+  log "GitHub CLI already installed"
+else
+  info "Installing GitHub CLI..."
+  (type -p wget >/dev/null || (sudo apt update && sudo apt install wget -y)) \
+    && sudo mkdir -p -m 755 /etc/apt/keyrings \
+    && out=$(mktemp) && wget -nv -O"$out" https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    && cat "$out" | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+    && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && sudo apt update && sudo apt install gh -y
+  log "GitHub CLI installed"
+fi
+
+# ---------------------------------------------------------------------------
+# 2. System packages
 # ---------------------------------------------------------------------------
 info "Updating system packages..."
 sudo apt update && sudo apt upgrade -y
@@ -76,7 +106,7 @@ sudo apt install -y \
 log "System packages installed"
 
 # ---------------------------------------------------------------------------
-# 2. Homebrew
+# 3. Homebrew
 # ---------------------------------------------------------------------------
 if command -v brew &>/dev/null; then
   log "Homebrew already installed"
@@ -100,7 +130,7 @@ fi
 eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 3. nvm + Node.js
+# 4. nvm + Node.js
 # ---------------------------------------------------------------------------
 export NVM_DIR="$HOME/.nvm"
 
@@ -130,7 +160,7 @@ npm install -g pnpm yarn typescript ts-node
 log "Global npm packages installed"
 
 # ---------------------------------------------------------------------------
-# 4. Docker
+# 5. Docker
 # ---------------------------------------------------------------------------
 if command -v docker &>/dev/null; then
   log "Docker already installed"
@@ -158,7 +188,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Tailscale
+# 6. Tailscale
 # ---------------------------------------------------------------------------
 if command -v tailscale &>/dev/null; then
   log "Tailscale already installed"
@@ -170,7 +200,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. tmux
+# 7. tmux
 # ---------------------------------------------------------------------------
 if command -v tmux &>/dev/null; then
   log "tmux already installed"
@@ -232,7 +262,7 @@ TMUXCONF
 log "tmux configured"
 
 # ---------------------------------------------------------------------------
-# 7. Supabase CLI
+# 8. Supabase CLI
 # ---------------------------------------------------------------------------
 if command -v supabase &>/dev/null; then
   log "Supabase CLI already installed"
@@ -243,25 +273,33 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 8. lazygit
+# 9. lazygit
 # ---------------------------------------------------------------------------
 if command -v lazygit &>/dev/null; then
   log "lazygit already installed"
 else
   info "Installing lazygit..."
-  brew install lazygit
-  log "lazygit installed"
+  # Install system-wide so all users get it
+  LAZYGIT_VERSION=$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" | grep -Po '"tag_name": "v\K[^"]*')
+  curl -Lo /tmp/lazygit.tar.gz "https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_${LAZYGIT_VERSION}_Linux_x86_64.tar.gz"
+  sudo tar xf /tmp/lazygit.tar.gz -C /usr/local/bin lazygit
+  rm /tmp/lazygit.tar.gz
+  log "lazygit installed (system-wide)"
 fi
 
 # ---------------------------------------------------------------------------
-# 9. delta (git pager)
+# 10. delta (git pager)
 # ---------------------------------------------------------------------------
 if command -v delta &>/dev/null; then
   log "delta already installed"
 else
   info "Installing delta..."
-  brew install git-delta
-  log "delta installed"
+  # Install system-wide so all users get it
+  DELTA_VERSION=$(curl -s "https://api.github.com/repos/dandavison/delta/releases/latest" | grep -Po '"tag_name": "\K[^"]*')
+  curl -Lo /tmp/delta.deb "https://github.com/dandavison/delta/releases/latest/download/git-delta_${DELTA_VERSION}_amd64.deb"
+  sudo dpkg -i /tmp/delta.deb
+  rm /tmp/delta.deb
+  log "delta installed (system-wide)"
 fi
 
 # Configure git to use delta
@@ -277,7 +315,7 @@ git config --global diff.colorMoved default
 log "Git configured with delta"
 
 # ---------------------------------------------------------------------------
-# 10. Codex CLI (OpenAI)
+# 11. Codex CLI (OpenAI)
 # ---------------------------------------------------------------------------
 if command -v codex &>/dev/null; then
   log "Codex CLI already installed"
@@ -288,7 +326,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 11. Directory structure
+# 12. Directory structure
 # ---------------------------------------------------------------------------
 info "Creating directory structure..."
 mkdir -p ~/projects
@@ -305,7 +343,7 @@ fi
 log "Directory structure created"
 
 # ---------------------------------------------------------------------------
-# 12. Install the `dev` CLI
+# 13. Install the `dev` CLI
 # ---------------------------------------------------------------------------
 info "Installing dev CLI..."
 if [ -f "$(dirname "$0")/dev-cli.sh" ]; then
@@ -318,10 +356,16 @@ chmod +x ~/.local/bin/dev 2>/dev/null || true
 log "dev CLI installed"
 
 # ---------------------------------------------------------------------------
-# 13. Shell enhancements
+# 14. Shell enhancements
 # ---------------------------------------------------------------------------
 info "Adding shell aliases and helpers..."
 cat >> ~/.bashrc << 'BASHRC'
+
+# ── Terminal compatibility ─────────────────────────────────
+# Fix for terminals like Ghostty whose $TERM isn't in remote terminfo
+if ! infocmp "$TERM" &>/dev/null 2>&1; then
+  export TERM=xterm-256color
+fi
 
 # ── Dev CLI shortcuts ───────────────────────────────────────
 alias d="dev"
@@ -342,7 +386,7 @@ BASHRC
 log "Shell enhancements added"
 
 # ---------------------------------------------------------------------------
-# 14. API keys placeholder
+# 15. API keys placeholder
 # ---------------------------------------------------------------------------
 if [ ! -f ~/.config/dev-cli/secrets.env ]; then
   info "Creating API keys placeholder..."
@@ -362,7 +406,7 @@ SECRETS
 fi
 
 # ---------------------------------------------------------------------------
-# 15. Multi-user helper (add-dev-user)
+# 16. Multi-user helper (add-dev-user)
 # ---------------------------------------------------------------------------
 info "Installing add-dev-user helper..."
 sudo tee /usr/local/bin/add-dev-user > /dev/null << 'ADD_USER_SCRIPT'
@@ -399,14 +443,14 @@ else
   echo "  ✓ User created"
 fi
 
-# Add to docker group
-usermod -aG docker "$USERNAME" 2>/dev/null || true
-echo "  ✓ Added to docker group"
+# Add to docker and sudo groups
+usermod -aG docker,sudo "$USERNAME" 2>/dev/null || true
+echo "  ✓ Added to docker and sudo groups"
 
 # Install dev-cli for the user
 DEV_CLI_REPO="/opt/dev-cli"
 if [ -d "$DEV_CLI_REPO" ]; then
-  su - "$USERNAME" -c "bash $DEV_CLI_REPO/install.sh" || true
+  su - "$USERNAME" -c "echo N | bash $DEV_CLI_REPO/install.sh" || true
   echo "  ✓ dev-cli installed"
 else
   echo "  ! dev-cli repo not found at $DEV_CLI_REPO — install manually"
