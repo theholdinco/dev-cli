@@ -1913,6 +1913,19 @@ cmd_gc() {
   log "Garbage collection complete. Removed ${#dead[@]} session(s)."
 }
 
+cmd_stats() {
+  # Show quick session summary then launch btop
+  local session_count=0
+  if [[ -f "$PORT_REGISTRY" ]]; then
+    session_count=$(jq 'length' "$PORT_REGISTRY" 2>/dev/null || echo 0)
+  fi
+  echo ""
+  echo -e "  ${BOLD}dev stats${NC} — VPS Resource Monitor"
+  echo -e "  ${CYAN}Active sessions:${NC} $session_count  ${DIM}|${NC}  ${CYAN}Load:${NC} $(uptime | awk -F'load average: ' '{print $2}')"
+  echo ""
+  exec btop
+}
+
 cmd_doctor() {
   echo ""
   echo -e "  ${BOLD}dev doctor${NC} — System Health Check"
@@ -2801,6 +2814,7 @@ cmd_help() {
 
   MAINTENANCE
     dev gc                                  Clean up dead sessions
+    dev stats                               Launch resource monitor (btop)
     dev doctor                              System health check
     dev template <project>                  Edit project hook/template
 
@@ -2868,6 +2882,7 @@ case "${1:-help}" in
   template)  cmd_template "$@" ;;
   config)    cmd_config "$@" ;;
   agent)     cmd_agent "$@" ;;
+  stats)     cmd_stats ;;
   doctor)    cmd_doctor ;;
   help|-h|--help) cmd_help ;;
   *)         die "Unknown command: $1. Run 'dev help' for usage." ;;

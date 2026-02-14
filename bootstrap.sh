@@ -88,7 +88,7 @@ sudo apt install -y \
   unzip \
   zip \
   jq \
-  htop \
+  btop \
   tree \
   ripgrep \
   fd-find \
