@@ -346,13 +346,13 @@ log "Directory structure created"
 # 13. Install the `dev` CLI
 # ---------------------------------------------------------------------------
 info "Installing dev CLI..."
-if [ -f "$(dirname "$0")/dev-cli.sh" ]; then
-  cp "$(dirname "$0")/dev-cli.sh" ~/.local/bin/dev
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/install.sh" ]; then
+  echo N | bash "$SCRIPT_DIR/install.sh"
 else
-  warn "dev-cli.sh not found alongside bootstrap.sh"
-  warn "Copy dev-cli.sh to ~/.local/bin/dev manually"
+  warn "install.sh not found at $SCRIPT_DIR"
+  warn "Run ./install.sh manually from the dev-cli repo"
 fi
-chmod +x ~/.local/bin/dev 2>/dev/null || true
 log "dev CLI installed"
 
 # ---------------------------------------------------------------------------

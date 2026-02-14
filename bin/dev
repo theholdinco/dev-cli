@@ -2055,20 +2055,25 @@ cmd_projects() {
 }
 
 cmd_update() {
-  local REPO_DIR="$HOME/.dev-cli-repo"
+  # Check common repo locations
+  local REPO_DIR=""
+  for candidate in /opt/dev-cli "$HOME/.dev-cli-repo"; do
+    if [ -d "$candidate/.git" ] || [ -d "$candidate/bin" ]; then
+      REPO_DIR="$candidate"
+      break
+    fi
+  done
 
-  if [ ! -d "$REPO_DIR" ]; then
-    die "Repo not found at $REPO_DIR. Clone it first:\n  git clone <url> $REPO_DIR"
+  if [ -z "$REPO_DIR" ]; then
+    die "dev-cli repo not found. Expected at /opt/dev-cli or ~/.dev-cli-repo"
   fi
 
-  info "Pulling latest changes..."
+  info "Pulling latest changes from $REPO_DIR..."
   cd "$REPO_DIR"
   git pull origin main 2>&1 | tail -5
 
   info "Reinstalling..."
-  cp "$REPO_DIR/bin/dev" "$HOME/.local/bin/dev"
-  cp "$REPO_DIR/bin/dev-hub" "$HOME/.local/bin/dev-hub"
-  chmod +x "$HOME/.local/bin/dev" "$HOME/.local/bin/dev-hub"
+  bash "$REPO_DIR/install.sh" <<< "N"
 
   log "Updated to latest version"
 }
