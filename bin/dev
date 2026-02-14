@@ -39,7 +39,7 @@ BASE_SUPA_DB_PORT=54322
 BASE_SUPA_STUDIO_PORT=54323
 SUPA_PORT_GAP=10  # each slot offsets by this
 
-MAX_SLOTS=5
+MAX_SLOTS=50
 
 # Colors
 RED='\033[0;31m'
@@ -123,6 +123,7 @@ register_session() {
      --argjson slot "$slot" \
      --arg agent "$agent" \
      --arg path "$worktree_path" \
+     --arg owner "$USER" \
      --argjson frontend "$frontend" \
      --argjson backend "$backend" \
      --argjson supa_api "$supa_api" \
@@ -135,6 +136,7 @@ register_session() {
         slot: $slot,
         agent: $agent,
         path: $path,
+        owner: $owner,
         ports: {
           frontend: $frontend,
           backend: $backend,
@@ -761,14 +763,18 @@ cmd_new() {
   export DEV_IP="$(get_ip)"
 
   # Run project setup hook OR default env generation
-  local hook_dir="$CONFIG_DIR/hooks/$project"
-  local setup_hook="$hook_dir/setup.sh"
+  # Priority: 1) in-repo .dev/setup.sh  2) global hook  3) default env generation
+  local repo_hook="$worktree_path/.dev/setup.sh"
+  local global_hook="$CONFIG_DIR/hooks/$project/setup.sh"
 
-  if [ -x "$setup_hook" ]; then
-    info "Running project setup hook..."
-    cd "$worktree_path"
-    bash "$setup_hook"
-    log "Project hook completed"
+  if [ -x "$repo_hook" ]; then
+    info "Running in-repo setup hook (.dev/setup.sh)..."
+    cd "$worktree_path" && bash "$repo_hook"
+    log "In-repo hook completed"
+  elif [ -x "$global_hook" ]; then
+    info "Running global project setup hook..."
+    cd "$worktree_path" && bash "$global_hook"
+    log "Global hook completed"
   else
     # Default behavior: single .env.local + supabase patch
     generate_env_local "$worktree_path" "$slot" "$project"
@@ -870,30 +876,58 @@ cmd_new() {
 cmd_ls() {
   ensure_dirs
 
+  # Parse flags
+  local show_all=false
+  shift || true
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --all|-a) show_all=true; shift ;;
+      *) shift ;;
+    esac
+  done
+
   local sessions
-  sessions=$(jq -r 'keys[]' "$PORT_REGISTRY" 2>/dev/null)
+  if [ "$show_all" = true ]; then
+    sessions=$(jq -r 'keys[]' "$PORT_REGISTRY" 2>/dev/null)
+  else
+    sessions=$(jq -r --arg user "$USER" 'to_entries[] | select(.value.owner == $user or .value.owner == null) | .key' "$PORT_REGISTRY" 2>/dev/null)
+  fi
 
   if [ -z "$sessions" ]; then
-    echo -e "${DIM}No active sessions. Run 'dev new <project> <branch>' to start one.${NC}"
+    if [ "$show_all" = true ]; then
+      echo -e "${DIM}No active sessions. Run 'dev new <project> <branch>' to start one.${NC}"
+    else
+      echo -e "${DIM}No active sessions for $USER. Use 'dev ls --all' to see all sessions.${NC}"
+    fi
     return 0
   fi
 
   local ip
   ip=$(get_ip)
+  local total_count
+  total_count=$(jq 'length' "$PORT_REGISTRY" 2>/dev/null || echo "0")
 
   # Header
   printf "\n"
-  printf "  ${BOLD}%-30s %-8s %-8s %-8s %-10s %-6s %-8s${NC}\n" \
-    "SESSION" "AGENT" "FRONT" "BACK" "BRANCH" "AGE" "STATUS"
-  printf "  ${DIM}%-30s %-8s %-8s %-8s %-10s %-6s %-8s${NC}\n" \
-    "──────────────────────────────" "────────" "────────" "────────" "──────────" "──────" "────────"
+  if [ "$show_all" = true ]; then
+    echo -e "  ${DIM}All sessions ($total_count/$MAX_SLOTS slots used)${NC}"
+  else
+    echo -e "  ${DIM}$USER's sessions ($total_count/$MAX_SLOTS total slots used)${NC}"
+  fi
+  printf "\n"
+  printf "  ${BOLD}%-30s %-10s %-8s %-8s %-8s %-10s %-6s %-8s${NC}\n" \
+    "SESSION" "OWNER" "AGENT" "FRONT" "BACK" "BRANCH" "AGE" "STATUS"
+  printf "  ${DIM}%-30s %-10s %-8s %-8s %-8s %-10s %-6s %-8s${NC}\n" \
+    "──────────────────────────────" "──────────" "────────" "────────" "────────" "──────────" "──────" "────────"
 
   while IFS= read -r name; do
-    local agent branch frontend backend
+    local agent branch frontend backend owner
     agent=$(get_session_field "$name" "agent")
     branch=$(get_session_field "$name" "branch")
     frontend=$(get_session_field "$name" "ports.frontend")
     backend=$(get_session_field "$name" "ports.backend")
+    owner=$(get_session_field "$name" "owner")
+    owner="${owner:-unknown}"
 
     local created age
     created=$(get_session_field "$name" "created")
@@ -911,8 +945,8 @@ cmd_ls() {
     local branch_display
     branch_display=$(echo "$branch" | cut -c1-10)
 
-    printf "  %-30s %-8s %-8s %-8s %-10s %-6s " \
-      "$name" "$agent" ":$frontend" ":$backend" "$branch_display" "$age"
+    printf "  %-30s %-10s %-8s %-8s %-8s %-10s %-6s " \
+      "$name" "$owner" "$agent" ":$frontend" ":$backend" "$branch_display" "$age"
     echo -e "$status"
   done <<< "$sessions"
 
@@ -1035,6 +1069,15 @@ cmd_kill() {
   fi
 
   name="$match"
+  local session_owner
+  session_owner=$(get_session_field "$name" "owner")
+  if [ -n "$session_owner" ] && [ "$session_owner" != "$USER" ]; then
+    echo ""
+    echo -ne "  ${YELLOW}Session '$name' belongs to $session_owner. Kill anyway? [y/N]:${NC} "
+    read -r confirm
+    [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || { echo "  Cancelled."; return 0; }
+  fi
+
   local worktree_path project
   worktree_path=$(get_session_field "$name" "path")
   project=$(get_session_field "$name" "project")
@@ -1147,23 +1190,20 @@ cmd_ports() {
   printf "  ${DIM}%-5s %-30s %-10s %-10s %-10s %-10s %-10s${NC}\n" \
     "─────" "──────────────────────────────" "──────────" "──────────" "──────────" "──────────" "──────────"
 
-  for slot in $(seq 1 $MAX_SLOTS); do
-    local session_name=""
-    local ports
-    ports=$(slot_ports "$slot")
-    read -r frontend backend supa_api supa_db supa_studio <<< "$ports"
+  local active_slots
+  active_slots=$(jq -r 'to_entries | sort_by(.value.slot) | .[] | "\(.value.slot)\t\(.key)"' "$PORT_REGISTRY" 2>/dev/null)
 
-    # Check if slot is in use
-    session_name=$(jq -r "to_entries[] | select(.value.slot == $slot) | .key" "$PORT_REGISTRY" 2>/dev/null || echo "")
-
-    if [ -n "$session_name" ]; then
+  if [ -z "$active_slots" ]; then
+    echo -e "  ${DIM}No active sessions. All $MAX_SLOTS slots available.${NC}"
+  else
+    while IFS=$'\t' read -r slot session_name; do
+      local ports
+      ports=$(slot_ports "$slot")
+      read -r frontend backend supa_api supa_db supa_studio <<< "$ports"
       printf "  ${GREEN}%-5s${NC} %-30s %-10s %-10s %-10s %-10s %-10s\n" \
         "$slot" "$session_name" ":$frontend" ":$backend" ":$supa_api" ":$supa_db" ":$supa_studio"
-    else
-      printf "  ${DIM}%-5s %-30s %-10s %-10s %-10s %-10s %-10s${NC}\n" \
-        "$slot" "(available)" ":$frontend" ":$backend" ":$supa_api" ":$supa_db" ":$supa_studio"
-    fi
-  done
+    done <<< "$active_slots"
+  fi
   echo ""
 }
 
@@ -2000,7 +2040,8 @@ cmd_help() {
   SESSIONS
     dev new <project> <branch> [--agent claude|codex|none]
                                             Create worktree + start agent
-    dev ls                                  List all active sessions
+    dev ls                                  List your active sessions
+    dev ls --all                              List all users' sessions
     dev attach [session]                    Attach to tmux session (interactive picker if no arg)
     dev kill <session>                      Stop agent + remove worktree + free ports
     dev kill --all                          Kill all sessions
@@ -2046,6 +2087,17 @@ cmd_help() {
     dev doctor                              System health check
     dev template <project>                  Edit project hook/template
 
+  SETUP HOOKS (checked in priority order)
+    1. <worktree>/.dev/setup.sh             In-repo hook (travels with the code)
+    2. ~/.config/dev-cli/hooks/<project>/setup.sh
+                                            Global hook (per-project)
+    3. Default env generation               .env.local + supabase config patch
+
+    Available env vars in hooks:
+      DEV_SLOT, DEV_PROJECT, DEV_BRANCH, DEV_WORKTREE, DEV_IP,
+      DEV_FRONTEND_PORT, DEV_BACKEND_PORT,
+      DEV_SUPA_API_PORT, DEV_SUPA_DB_PORT, DEV_SUPA_STUDIO_PORT
+
   EXAMPLES
     dev init                                 # interactive setup for new project
     dev setup klyra git@github.com:org/klyra.git
@@ -2074,7 +2126,7 @@ case "${1:-help}" in
   init)      cmd_init "$@" ;;
   setup)     cmd_setup "$@" ;;
   new)       cmd_new "$@" ;;
-  ls|list)   cmd_ls ;;
+  ls|list)   cmd_ls "$@" ;;
   attach|a)  cmd_attach "$@" ;;
   kill|rm)   cmd_kill "$@" ;;
   hub)       cmd_hub ;;

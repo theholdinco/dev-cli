@@ -44,8 +44,9 @@ INVERSE='\033[7m'
 
 # State
 SELECTED=1
-MAX_SLOTS=5
+MAX_SLOTS=50
 PREVIEW_LINES=8
+SHOW_ALL=true  # show all users by default in hub
 
 # ── Helpers ─────────────────────────────────────────────────
 
@@ -67,6 +68,26 @@ session_at_slot() {
 
 session_count() {
   jq 'length' "$PORT_REGISTRY" 2>/dev/null || echo "0"
+}
+
+# Get active sessions sorted by slot, one per line: "slot\tname"
+# If SHOW_ALL=false, filter to current $USER only
+get_active_sessions_sorted() {
+  if [ "$SHOW_ALL" = true ]; then
+    jq -r 'to_entries | sort_by(.value.slot) | .[] | "\(.value.slot)\t\(.key)"' "$PORT_REGISTRY" 2>/dev/null
+  else
+    jq -r --arg user "$USER" 'to_entries | map(select(.value.owner == $user or .value.owner == null)) | sort_by(.value.slot) | .[] | "\(.value.slot)\t\(.key)"' "$PORT_REGISTRY" 2>/dev/null
+  fi
+}
+
+active_session_count() {
+  local sessions
+  sessions=$(get_active_sessions_sorted)
+  if [ -z "$sessions" ]; then
+    echo "0"
+  else
+    echo "$sessions" | wc -l | tr -d ' '
+  fi
 }
 
 # Get last N lines from a tmux session's agent pane
@@ -149,20 +170,45 @@ render() {
   # Header
   echo ""
   echo -e "  ${BOLD}${CYAN}DEV HUB${NC}                                      ${DIM}$now${NC}"
-  echo -e "  ${DIM}$count active sessions · $ip${NC}"
+  local filter_label
+  if [ "$SHOW_ALL" = true ]; then
+    filter_label="all users"
+  else
+    filter_label="$USER only"
+  fi
+  echo -e "  ${DIM}$count/$MAX_SLOTS slots used · $ip · $filter_label${NC}"
   echo ""
+
+  # Build active sessions list (index-based selection, not slot-based)
+  local active_sessions
+  active_sessions=$(get_active_sessions_sorted)
+  local active_count
+  active_count=$(active_session_count)
+
+  # Clamp SELECTED to valid range
+  if [ "$active_count" -gt 0 ] && [ "$SELECTED" -gt "$active_count" ]; then
+    SELECTED="$active_count"
+  fi
+  if [ "$SELECTED" -lt 1 ]; then
+    SELECTED=1
+  fi
 
   # Session list
   local selected_name=""
-  for slot in $(seq 1 $MAX_SLOTS); do
-    local name
-    name=$(session_at_slot "$slot")
+  if [ -z "$active_sessions" ]; then
+    echo -e "  ${DIM}  No active sessions. Press [n] to create one.${NC}"
+    echo ""
+  else
+    local idx=0
+    while IFS=$'\t' read -r slot name; do
+      idx=$((idx + 1))
 
-    if [ -n "$name" ]; then
-      local agent branch frontend status status_icon
+      local agent branch frontend owner status_icon
       agent=$(get_session_field "$name" "agent")
       branch=$(get_session_field "$name" "branch")
       frontend=$(get_session_field "$name" "ports.frontend")
+      owner=$(get_session_field "$name" "owner")
+      owner="${owner:-?}"
 
       local created age git_info
       created=$(get_session_field "$name" "created")
@@ -173,30 +219,27 @@ render() {
 
       if is_alive "$name"; then
         status_icon="${GREEN}●${NC}"
-        status="running"
       else
         status_icon="${RED}●${NC}"
-        status="dead"
       fi
 
       # Truncate name for display
       local display_name
-      display_name=$(printf "%-28s" "$name")
+      display_name=$(printf "%-24s" "$name")
 
-      if [ "$slot" -eq "$SELECTED" ]; then
+      local owner_badge=""
+      if [ "$SHOW_ALL" = true ] && [ -n "$owner" ]; then
+        owner_badge="${DIM}[$owner]${NC} "
+      fi
+
+      if [ "$idx" -eq "$SELECTED" ]; then
         selected_name="$name"
-        echo -e "  ${BG_SELECT}${BOLD} [$slot] $status_icon $display_name ${agent}  :${frontend}  ${DIM}${age}${NC}${BG_SELECT} ${git_info:-} ${NC}"
+        echo -e "  ${BG_SELECT}${BOLD} $status_icon $display_name ${owner_badge}${agent}  :${frontend}  ${DIM}${age}${NC}${BG_SELECT} ${git_info:-} ${NC}"
       else
-        echo -e "   [$slot] $status_icon ${display_name} ${DIM}${agent}  :${frontend}  ${age} ${git_info:-}${NC}"
+        echo -e "   $status_icon ${display_name} ${owner_badge}${DIM}${agent}  :${frontend}  ${age} ${git_info:-}${NC}"
       fi
-    else
-      if [ "$slot" -eq "$SELECTED" ]; then
-        echo -e "  ${BG_SELECT}${DIM} [$slot] ○ (available)                                  ${NC}"
-      else
-        echo -e "   ${DIM}[$slot] ○ (available)${NC}"
-      fi
-    fi
-  done
+    done <<< "$active_sessions"
+  fi
 
   # Preview
   echo ""
@@ -219,16 +262,21 @@ render() {
   echo ""
   echo -e "  ${DIM}─────────────────────────────────────────────────${NC}"
   echo ""
-  echo -e "  ${BOLD}[1-5]${NC} select  ${BOLD}[Enter]${NC} attach  ${BOLD}[n]${NC}ew  ${BOLD}[k]${NC}ill  ${BOLD}[p]${NC}orts  ${BOLD}[d]${NC}iff"
-  echo -e "  ${BOLD}[m]${NC}erge/PR  ${BOLD}[l]${NC}azygit  ${BOLD}[s]${NC}hell  ${BOLD}[u]${NC}rl  ${BOLD}[i]${NC}nfo  ${BOLD}[r]${NC}efresh  ${BOLD}[q]${NC}uit"
+  echo -e "  ${BOLD}[↑↓]${NC} select  ${BOLD}[Enter]${NC} attach  ${BOLD}[n]${NC}ew  ${BOLD}[k]${NC}ill  ${BOLD}[p]${NC}orts  ${BOLD}[d]${NC}iff"
+  echo -e "  ${BOLD}[m]${NC}erge/PR  ${BOLD}[l]${NC}azygit  ${BOLD}[s]${NC}hell  ${BOLD}[u]${NC}rl  ${BOLD}[i]${NC}nfo  ${BOLD}[a]${NC}ll  ${BOLD}[r]${NC}efresh  ${BOLD}[q]${NC}uit"
   echo ""
 }
 
 # ── Actions ─────────────────────────────────────────────────
 
+# Get the session name at a given 1-based index in the active list
+selected_session_name() {
+  get_active_sessions_sorted | sed -n "${SELECTED}p" | cut -f2
+}
+
 action_attach() {
   local name
-  name=$(session_at_slot "$SELECTED")
+  name=$(selected_session_name)
   [ -z "$name" ] && return
 
   if is_alive "$name"; then
@@ -312,7 +360,7 @@ action_new() {
 
 action_kill() {
   local name
-  name=$(session_at_slot "$SELECTED")
+  name=$(selected_session_name)
   [ -z "$name" ] && return
 
   echo ""
@@ -328,7 +376,7 @@ action_kill() {
 
 action_shell() {
   local name
-  name=$(session_at_slot "$SELECTED")
+  name=$(selected_session_name)
   [ -z "$name" ] && return
 
   if is_alive "$name"; then
@@ -338,7 +386,7 @@ action_shell() {
 
 action_lazygit() {
   local name
-  name=$(session_at_slot "$SELECTED")
+  name=$(selected_session_name)
   [ -z "$name" ] && return
 
   local path
@@ -351,7 +399,7 @@ action_lazygit() {
 
 action_url() {
   local name
-  name=$(session_at_slot "$SELECTED")
+  name=$(selected_session_name)
   [ -z "$name" ] && return
 
   local ip frontend backend
@@ -368,7 +416,7 @@ action_url() {
 
 action_pr() {
   local name
-  name=$(session_at_slot "$SELECTED")
+  name=$(selected_session_name)
   [ -z "$name" ] && return
 
   printf '\033[2J\033[H'
@@ -391,7 +439,7 @@ action_ports() {
 
 action_diff() {
   local name
-  name=$(session_at_slot "$SELECTED")
+  name=$(selected_session_name)
   [ -z "$name" ] && return
 
   local path
@@ -409,10 +457,10 @@ action_diff() {
 
 action_info() {
   local name
-  name=$(session_at_slot "$SELECTED")
+  name=$(selected_session_name)
   [ -z "$name" ] && return
 
-  local path project branch agent created frontend backend
+  local path project branch agent created frontend backend owner
   path=$(get_session_field "$name" "path")
   project=$(get_session_field "$name" "project")
   branch=$(get_session_field "$name" "branch")
@@ -420,6 +468,8 @@ action_info() {
   created=$(get_session_field "$name" "created")
   frontend=$(get_session_field "$name" "ports.frontend")
   backend=$(get_session_field "$name" "ports.backend")
+  owner=$(get_session_field "$name" "owner")
+  owner="${owner:-unknown}"
   local age
   age=$(human_readable_age "$created")
 
@@ -427,6 +477,7 @@ action_info() {
   echo ""
   echo -e "  ${BOLD}Session Info: $name${NC}"
   echo ""
+  echo -e "  Owner:      $owner"
   echo -e "  Project:    $project"
   echo -e "  Branch:     $branch"
   echo -e "  Agent:      $agent"
@@ -485,8 +536,14 @@ main() {
     read -rsn1 -t 5 key || true
 
     case "$key" in
-      1|2|3|4|5)
-        SELECTED="$key"
+      a|A)
+        # Toggle between "my sessions" / "all sessions"
+        if [ "$SHOW_ALL" = true ]; then
+          SHOW_ALL=false
+        else
+          SHOW_ALL=true
+        fi
+        SELECTED=1
         ;;
       "")
         # Enter key — attach to selected session
@@ -529,12 +586,15 @@ main() {
       $'\x1b')
         # Arrow keys (escape sequence)
         read -rsn2 -t 0.1 arrow || true
+        local ac
+        ac=$(active_session_count)
+        [ "$ac" -eq 0 ] && ac=1
         case "$arrow" in
           '[A') # Up
-            SELECTED=$(( SELECTED > 1 ? SELECTED - 1 : MAX_SLOTS ))
+            SELECTED=$(( SELECTED > 1 ? SELECTED - 1 : ac ))
             ;;
           '[B') # Down
-            SELECTED=$(( SELECTED < MAX_SLOTS ? SELECTED + 1 : 1 ))
+            SELECTED=$(( SELECTED < ac ? SELECTED + 1 : 1 ))
             ;;
         esac
         ;;

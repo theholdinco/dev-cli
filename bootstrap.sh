@@ -362,6 +362,94 @@ SECRETS
 fi
 
 # ---------------------------------------------------------------------------
+# 15. Multi-user helper (add-dev-user)
+# ---------------------------------------------------------------------------
+info "Installing add-dev-user helper..."
+sudo tee /usr/local/bin/add-dev-user > /dev/null << 'ADD_USER_SCRIPT'
+#!/usr/bin/env bash
+###############################################################################
+# add-dev-user — Add a new engineer to the shared dev VPS
+#
+# Usage: sudo add-dev-user <username>
+#
+# Creates a Linux user, adds to docker group, installs dev-cli,
+# and links shared project secrets.
+###############################################################################
+
+set -euo pipefail
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Error: Must run as root (sudo add-dev-user <username>)"
+  exit 1
+fi
+
+USERNAME="${1:-}"
+if [ -z "$USERNAME" ]; then
+  echo "Usage: sudo add-dev-user <username>"
+  exit 1
+fi
+
+echo "Creating user: $USERNAME"
+
+# Create user with home directory
+if id "$USERNAME" &>/dev/null; then
+  echo "User '$USERNAME' already exists, skipping creation"
+else
+  useradd -m -s /bin/bash "$USERNAME"
+  echo "  ✓ User created"
+fi
+
+# Add to docker group
+usermod -aG docker "$USERNAME" 2>/dev/null || true
+echo "  ✓ Added to docker group"
+
+# Install dev-cli for the user
+DEV_CLI_REPO="/opt/dev-cli"
+if [ -d "$DEV_CLI_REPO" ]; then
+  su - "$USERNAME" -c "bash $DEV_CLI_REPO/install.sh" || true
+  echo "  ✓ dev-cli installed"
+else
+  echo "  ! dev-cli repo not found at $DEV_CLI_REPO — install manually"
+fi
+
+# Link shared secrets
+SHARED_SECRETS="/etc/dev-cli/secrets"
+USER_CONFIG="/home/$USERNAME/.config/dev-cli/secrets"
+if [ -d "$SHARED_SECRETS" ]; then
+  mkdir -p "$USER_CONFIG"
+  for secret_file in "$SHARED_SECRETS"/*; do
+    local_name=$(basename "$secret_file")
+    ln -sf "$secret_file" "$USER_CONFIG/$local_name"
+  done
+  chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.config/dev-cli"
+  echo "  ✓ Shared secrets linked"
+else
+  echo "  ! No shared secrets at $SHARED_SECRETS — create them first"
+fi
+
+# Ensure .bashrc sources nvm
+if [ -d "/home/$USERNAME/.nvm" ] || [ -d "$HOME/.nvm" ]; then
+  if ! grep -q 'NVM_DIR' "/home/$USERNAME/.bashrc" 2>/dev/null; then
+    cat >> "/home/$USERNAME/.bashrc" << 'NVM_INIT'
+
+# nvm
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+NVM_INIT
+    echo "  ✓ nvm sourced in .bashrc"
+  fi
+fi
+
+echo ""
+echo "Done! Next steps for $USERNAME:"
+echo "  1. Ensure the user is on your Tailscale tailnet"
+echo "  2. User logs in:  ssh $USERNAME@<tailscale-hostname>"
+echo "  3. User runs:     dev doctor"
+ADD_USER_SCRIPT
+sudo chmod +x /usr/local/bin/add-dev-user
+log "add-dev-user helper installed at /usr/local/bin/add-dev-user"
+
+# ---------------------------------------------------------------------------
 # Done
 # ---------------------------------------------------------------------------
 echo ""
