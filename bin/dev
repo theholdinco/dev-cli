@@ -1778,11 +1778,11 @@ cmd_doctor() {
 
   # Codex
   if command -v codex &>/dev/null; then
-    if [ -n "${OPENAI_API_KEY:-}" ]; then
-      echo -e "  ${GREEN}✓${NC} Codex — API key set"
+    if [ -n "${OPENAI_API_KEY:-}" ] || [ -f "$HOME/.codex/auth.json" ]; then
+      echo -e "  ${GREEN}✓${NC} Codex — authenticated"
       ok=$((ok + 1))
     else
-      echo -e "  ${YELLOW}○${NC} Codex — no API key (run: codex login or set OPENAI_API_KEY)"
+      echo -e "  ${YELLOW}○${NC} Codex — not authenticated (run: codex login)"
       warn_count=$((warn_count + 1))
     fi
   else

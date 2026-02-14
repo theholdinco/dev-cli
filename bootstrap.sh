@@ -130,33 +130,20 @@ fi
 eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 4. nvm + Node.js
+# 4. Node.js (system-wide via NodeSource)
 # ---------------------------------------------------------------------------
-export NVM_DIR="$HOME/.nvm"
-
-if [ -d "$NVM_DIR" ]; then
-  log "nvm already installed"
-else
-  info "Installing nvm..."
-  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-  log "nvm installed"
-fi
-
-# Source nvm for this script
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-
 if command -v node &>/dev/null; then
   log "Node.js already installed: $(node --version)"
 else
-  info "Installing Node.js LTS..."
-  nvm install --lts
-  nvm alias default node
-  log "Node.js $(node --version) installed"
+  info "Installing Node.js LTS (system-wide)..."
+  curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+  sudo apt install -y nodejs
+  log "Node.js $(node --version) installed (system-wide)"
 fi
 
-# Install global npm packages
+# Install global npm packages (system-wide)
 info "Installing global npm packages..."
-npm install -g pnpm yarn typescript ts-node
+sudo npm install -g pnpm yarn typescript ts-node
 log "Global npm packages installed"
 
 # ---------------------------------------------------------------------------
@@ -188,7 +175,28 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Tailscale
+# 6. Firewall (ufw)
+# ---------------------------------------------------------------------------
+if command -v ufw &>/dev/null; then
+  info "Configuring firewall..."
+  # Allow SSH on public interface (so you don't lock yourself out)
+  sudo ufw allow OpenSSH
+  # Allow Tailscale interface (all traffic within tailnet is trusted)
+  sudo ufw allow in on tailscale0
+  # Enable firewall (idempotent)
+  sudo ufw --force enable
+  log "Firewall enabled: SSH + Tailscale allowed, all other inbound blocked"
+else
+  info "Installing ufw..."
+  sudo apt install -y ufw
+  sudo ufw allow OpenSSH
+  sudo ufw allow in on tailscale0
+  sudo ufw --force enable
+  log "Firewall installed and enabled"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Tailscale
 # ---------------------------------------------------------------------------
 if command -v tailscale &>/dev/null; then
   log "Tailscale already installed"
@@ -200,7 +208,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. tmux
+# 8. tmux
 # ---------------------------------------------------------------------------
 if command -v tmux &>/dev/null; then
   log "tmux already installed"
@@ -262,7 +270,7 @@ TMUXCONF
 log "tmux configured"
 
 # ---------------------------------------------------------------------------
-# 8. Supabase CLI
+# 9. Supabase CLI
 # ---------------------------------------------------------------------------
 if command -v supabase &>/dev/null; then
   log "Supabase CLI already installed"
@@ -273,7 +281,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 9. lazygit
+# 10. lazygit
 # ---------------------------------------------------------------------------
 if command -v lazygit &>/dev/null; then
   log "lazygit already installed"
@@ -288,7 +296,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 10. delta (git pager)
+# 11. delta (git pager)
 # ---------------------------------------------------------------------------
 if command -v delta &>/dev/null; then
   log "delta already installed"
@@ -315,18 +323,24 @@ git config --global diff.colorMoved default
 log "Git configured with delta"
 
 # ---------------------------------------------------------------------------
-# 11. Codex CLI (OpenAI)
+# 12. Codex CLI (system-wide via npm)
 # ---------------------------------------------------------------------------
 if command -v codex &>/dev/null; then
   log "Codex CLI already installed"
 else
   info "Installing Codex CLI..."
-  npm install -g @openai/codex
-  log "Codex CLI installed"
+  sudo npm install -g @openai/codex
+  log "Codex CLI installed (system-wide)"
 fi
 
 # ---------------------------------------------------------------------------
-# 12. Directory structure
+# Claude Code is per-user (each engineer installs + logs in with their own subscription)
+# ---------------------------------------------------------------------------
+info "Claude Code is per-user. Each engineer runs:"
+info "  curl -fsSL https://claude.ai/install.sh | bash && claude login"
+
+# ---------------------------------------------------------------------------
+# 14. Directory structure
 # ---------------------------------------------------------------------------
 info "Creating directory structure..."
 mkdir -p ~/projects
@@ -343,7 +357,7 @@ fi
 log "Directory structure created"
 
 # ---------------------------------------------------------------------------
-# 13. Install the `dev` CLI
+# 15. Install the `dev` CLI
 # ---------------------------------------------------------------------------
 info "Installing dev CLI..."
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -356,7 +370,7 @@ fi
 log "dev CLI installed"
 
 # ---------------------------------------------------------------------------
-# 14. Shell enhancements
+# 16. Shell enhancements
 # ---------------------------------------------------------------------------
 info "Adding shell aliases and helpers..."
 cat >> ~/.bashrc << 'BASHRC'
@@ -386,7 +400,7 @@ BASHRC
 log "Shell enhancements added"
 
 # ---------------------------------------------------------------------------
-# 15. API keys placeholder
+# 17. API keys placeholder
 # ---------------------------------------------------------------------------
 if [ ! -f ~/.config/dev-cli/secrets.env ]; then
   info "Creating API keys placeholder..."
@@ -406,7 +420,7 @@ SECRETS
 fi
 
 # ---------------------------------------------------------------------------
-# 16. Multi-user helper (add-dev-user)
+# 18. Multi-user helper (add-dev-user)
 # ---------------------------------------------------------------------------
 info "Installing add-dev-user helper..."
 sudo tee /usr/local/bin/add-dev-user > /dev/null << 'ADD_USER_SCRIPT'
