@@ -1133,10 +1133,25 @@ cmd_kill() {
   cd "$bare_dir"
   git worktree prune 2>/dev/null || true
 
-  # Delete the local branch (remote branch is untouched)
+  # Delete the local branch so the same branch name can be reused with dev new.
+  # Remote branch is untouched — only the local ref is removed.
   if [ -n "$branch" ]; then
     if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
-      git branch -D "$branch" 2>/dev/null && log "Deleted local branch '$branch'" || warn "Could not delete local branch '$branch'"
+      # Try safe delete first (fails if branch has unmerged/unpushed commits)
+      if git branch -d "$branch" 2>/dev/null; then
+        log "Deleted local branch '$branch'"
+      else
+        # Branch has unpushed work — ask before force-deleting
+        echo ""
+        warn "Branch '$branch' has commits not pushed to origin."
+        echo -ne "  ${YELLOW}Delete local branch anyway? [y/N]:${NC} "
+        read -r confirm
+        if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+          git branch -D "$branch" 2>/dev/null && log "Force-deleted local branch '$branch'" || warn "Could not delete local branch '$branch'"
+        else
+          warn "Kept local branch '$branch'. You may need to manually prune it before reusing this branch name."
+        fi
+      fi
     fi
   fi
 
