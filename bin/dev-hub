@@ -3,25 +3,7 @@
 # dev-hub — Interactive TUI for managing agent sessions
 #
 # Launched by `dev hub`. Runs inside tmux as a persistent control center.
-#
-# Layout:
-#   ┌─────────────────────────────────────────────┐
-#   │  DEV HUB                          10:32 AM  │
-#   │                                             │
-#   │  [1] ● klyra-feat-auth     claude  :3001   │
-#   │  [2] ● klyra-fix-bug       codex   :3002   │
-#   │  [3] ○ klyra-refactor      claude  :3003   │
-#   │  [ ] ○ (slot 4 — empty)                    │
-#   │  [ ] ○ (slot 5 — empty)                    │
-#   │                                             │
-#   │  ── Preview: klyra-feat-auth ──────────     │
-#   │  > Analyzing the trading module...          │
-#   │  > Created file: src/components/Trade.tsx   │
-#   │  > Running tests...                         │
-#   │                                             │
-#   │  [1-5] switch  [n]ew  [k]ill  [p]orts      │
-#   │  [r]efresh  [l]azygit  [s]hell  [q]uit     │
-#   └─────────────────────────────────────────────┘
+# Shows active sessions with preview pane and keyboard shortcuts.
 ###############################################################################
 
 set -euo pipefail

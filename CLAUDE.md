@@ -6,14 +6,14 @@
 
 ## Architecture
 
-- **`bin/dev`** — Main CLI entrypoint (~1400 lines bash). All commands route through a case statement at the bottom. Uses `jq` for JSON state management in `~/.config/dev-cli/ports.json`.
+- **`bin/dev`** — Main CLI entrypoint (~2900 lines bash). All commands route through a case statement at the bottom. Uses `jq` for JSON state management in `~/.config/dev-cli/ports.json`.
 - **`bin/dev-hub`** — Interactive TUI that runs inside tmux. Renders a dashboard with session list, preview pane, and keyboard shortcuts. Auto-refreshes every 5 seconds.
 - **`bootstrap.sh`** — One-time VPS setup script. Installs all system dependencies.
 - **`install.sh`** — Installs just the dev-cli binaries and config structure.
 
 ## Key concepts
 
-- **Slots (1-5):** Each active session gets a slot which determines its ports (frontend 3001-3005, backend 4001-4005, Supabase 54321/54331/etc.)
+- **Slots (1-50):** Each active session gets a slot which determines its ports (frontend 3001+, backend 4001+, Supabase 54321+/54322+/54323+ with gap of 10 per slot).
 - **Port registry:** `~/.config/dev-cli/ports.json` tracks all active sessions, their slots, ports, paths, and metadata.
 - **Setup hooks:** Monorepo projects use executable bash scripts at `~/.config/dev-cli/hooks/<project>/setup.sh` instead of env templates. These receive port info via environment variables (`DEV_FRONTEND_PORT`, etc.)
 - **Env templates:** Standard (non-monorepo) projects use `.env` template files with `{{PLACEHOLDER}}` syntax at `~/.config/dev-cli/templates/<project>.env`.
@@ -43,9 +43,15 @@ To install locally after changes:
 
 ## Common tasks
 
-- **Adding a new command:** Add `cmd_<name>()` function, add to the case statement at the bottom of `bin/dev`, add to `cmd_help()`, optionally add a keyboard shortcut in `bin/dev-hub`.
+- **Adding a new command:** Add `cmd_<name>()` function, add to the case statement at the bottom of `bin/dev`, add to `cmd_help()`, update tab completion in `install.sh`, optionally add a keyboard shortcut in `bin/dev-hub`.
 - **Changing port scheme:** Modify the `BASE_*_PORT` variables and `slot_ports()` function in `bin/dev`.
 - **Adding hub features:** Edit `bin/dev-hub` — add an `action_<name>()` function, add the key handler in the main loop case statement, update the footer render.
+
+## Important notes
+
+- `bin/dev` defines `die`, `log`, `info`, `warn` helpers but NOT `err`. `bootstrap.sh` has its own `err` helper. Don't use `err` in `bin/dev`.
+- When adding commands, remember to update tab completion in `install.sh` (the `commands`, `session_cmds`, and `project_cmds` variables).
+- `bin/dev-hub` duplicates some helpers from `bin/dev` (e.g., `get_session_field`, `human_readable_age`, `get_ip`). Keep them in sync.
 
 ## Model Routing
 

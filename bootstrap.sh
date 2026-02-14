@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 ###############################################################################
 # VPS Bootstrap Script
-# Run on a blank Hetzner Ubuntu VPS with only gh CLI and Claude Code installed.
+# Run on a blank Ubuntu VPS to set up a multi-agent development environment.
 #
 # Usage:
 #   curl -fsSL <raw-gist-url> | bash
@@ -386,7 +386,7 @@ alias d="dev"
 alias dl="dev ls"
 alias da="dev attach"
 alias dk="dev kill"
-alias dd="dev dashboard"
+alias dh="dev hub"
 
 # ── General aliases ─────────────────────────────────────────
 alias lg="lazygit"
@@ -528,9 +528,9 @@ echo "  3. Add your API keys:"
 echo "     $ nano ~/.config/dev-cli/secrets.env"
 echo ""
 echo "  4. Set up your first project:"
-echo "     $ dev setup klyra git@github.com:yourorg/klyra.git"
+echo "     $ dev init"
 echo ""
 echo "  5. Spin up an agent:"
-echo "     $ dev new klyra feat/my-feature --agent claude"
+echo "     $ dev new <project> feat/my-feature --agent claude"
 echo ""
 echo "============================================"
