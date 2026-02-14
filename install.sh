@@ -38,10 +38,12 @@ echo ""
 mkdir -p "$BIN_DIR" "$CONFIG_DIR"/{templates,hooks,projects,logs,secrets}
 mkdir -p "$HOME/images"
 
-# Copy binaries
-cp "$REPO_DIR/bin/dev" "$BIN_DIR/dev"
-cp "$REPO_DIR/bin/dev-hub" "$BIN_DIR/dev-hub"
-chmod +x "$BIN_DIR/dev" "$BIN_DIR/dev-hub"
+# Install binaries (atomic mv so a running 'dev' process isn't corrupted mid-read)
+cp "$REPO_DIR/bin/dev" "$BIN_DIR/dev.new"
+cp "$REPO_DIR/bin/dev-hub" "$BIN_DIR/dev-hub.new"
+chmod +x "$BIN_DIR/dev.new" "$BIN_DIR/dev-hub.new"
+mv "$BIN_DIR/dev.new" "$BIN_DIR/dev"
+mv "$BIN_DIR/dev-hub.new" "$BIN_DIR/dev-hub"
 log "Installed dev and dev-hub to $BIN_DIR/"
 
 # Ensure PATH includes ~/.local/bin

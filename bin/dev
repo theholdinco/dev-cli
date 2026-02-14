@@ -852,6 +852,9 @@ cmd_new() {
   # Set port env vars on tmux session so all windows/panes inherit them.
   # We use DEV_* prefixed vars (not PORT) to avoid overriding per-package
   # .env files — monorepo packages each set their own PORT via .env.
+  local ip
+  ip=$(get_ip)
+
   tmux new-session -d -s "$name" -n "agent" "${env_prefix}${agent_cmd}"
   tmux set-environment -t "$name" DEV_FRONTEND_PORT "$wt_frontend"
   tmux set-environment -t "$name" DEV_BACKEND_PORT "$wt_backend"
@@ -874,11 +877,9 @@ cmd_new() {
   # Select the agent window
   tmux select-window -t "$name:1"
 
-  local ip
-  ip=$(get_ip)
-  local ports
-  ports=$(slot_ports "$slot")
-  read -r frontend backend _ _ _ <<< "$ports"
+  local frontend backend
+  frontend="$wt_frontend"
+  backend="$wt_backend"
 
   log "Session '$name' is running!"
   echo ""
