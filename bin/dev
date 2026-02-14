@@ -2058,7 +2058,7 @@ cmd_update() {
   # Check common repo locations
   local REPO_DIR=""
   for candidate in /opt/dev-cli "$HOME/.dev-cli-repo"; do
-    if [ -d "$candidate/.git" ] || [ -d "$candidate/bin" ]; then
+    if [ -d "$candidate/bin/dev" ]; then
       REPO_DIR="$candidate"
       break
     fi
@@ -2068,9 +2068,14 @@ cmd_update() {
     die "dev-cli repo not found. Expected at /opt/dev-cli or ~/.dev-cli-repo"
   fi
 
-  info "Pulling latest changes from $REPO_DIR..."
-  cd "$REPO_DIR"
-  git pull origin main 2>&1 | tail -5
+  # Pull if user has write access, otherwise just reinstall from what's there
+  if [ -w "$REPO_DIR" ]; then
+    info "Pulling latest changes..."
+    cd "$REPO_DIR"
+    git pull origin main 2>&1 | tail -5
+  else
+    info "Using $REPO_DIR (no write access — ask admin to 'git pull' if needed)"
+  fi
 
   info "Reinstalling..."
   bash "$REPO_DIR/install.sh" <<< "N"
