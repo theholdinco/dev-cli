@@ -47,6 +47,65 @@ SELECTED=1
 MAX_SLOTS=50
 PREVIEW_LINES=8
 SHOW_ALL=true  # show all users by default in hub
+GLOBAL_CONFIG="$CONFIG_DIR/config.json"
+
+# ── Config Helpers ─────────────────────────────────────────
+
+# Read a keybind from config, falling back to provided default
+get_keybind() {
+  local action="$1" default="$2"
+  if [ -f "$GLOBAL_CONFIG" ]; then
+    local val
+    val=$(jq -r ".hub.keybinds.${action} // empty" "$GLOBAL_CONFIG" 2>/dev/null)
+    if [ -n "$val" ]; then
+      echo "$val"
+      return
+    fi
+  fi
+  echo "$default"
+}
+
+# Read a theme color name from config, return ANSI code
+get_theme_color() {
+  local name="$1" default="$2"
+  local color_name="$default"
+  if [ -f "$GLOBAL_CONFIG" ]; then
+    local val
+    val=$(jq -r ".hub.theme.${name} // empty" "$GLOBAL_CONFIG" 2>/dev/null)
+    if [ -n "$val" ]; then
+      color_name="$val"
+    fi
+  fi
+  case "$color_name" in
+    red)    echo '\033[0;31m' ;;
+    green)  echo '\033[0;32m' ;;
+    blue)   echo '\033[0;34m' ;;
+    yellow) echo '\033[1;33m' ;;
+    cyan)   echo '\033[0;36m' ;;
+    *)      echo '\033[0;36m' ;;
+  esac
+}
+
+# Load theme colors and keybinds from config
+load_config() {
+  THEME_ACCENT=$(get_theme_color "accent" "cyan")
+  THEME_ALIVE=$(get_theme_color "alive" "green")
+  THEME_DEAD=$(get_theme_color "dead" "red")
+
+  KEY_NEW=$(get_keybind "new" "n")
+  KEY_KILL=$(get_keybind "kill" "k")
+  KEY_LAZYGIT=$(get_keybind "lazygit" "l")
+
+  # Refresh interval
+  REFRESH_SECONDS=5
+  if [ -f "$GLOBAL_CONFIG" ]; then
+    local val
+    val=$(jq -r '.hub.refresh_seconds // empty' "$GLOBAL_CONFIG" 2>/dev/null)
+    if [ -n "$val" ]; then
+      REFRESH_SECONDS="$val"
+    fi
+  fi
+}
 
 # ── Helpers ─────────────────────────────────────────────────
 
@@ -169,7 +228,7 @@ render() {
 
   # Header
   echo ""
-  echo -e "  ${BOLD}${CYAN}DEV HUB${NC}                                      ${DIM}$now${NC}"
+  echo -e "  ${BOLD}${THEME_ACCENT}DEV HUB${NC}                                      ${DIM}$now${NC}"
   local filter_label
   if [ "$SHOW_ALL" = true ]; then
     filter_label="all users"
@@ -218,9 +277,9 @@ render() {
       git_info=$(get_git_info "$wt_path")
 
       if is_alive "$name"; then
-        status_icon="${GREEN}●${NC}"
+        status_icon="${THEME_ALIVE}●${NC}"
       else
-        status_icon="${RED}●${NC}"
+        status_icon="${THEME_DEAD}●${NC}"
       fi
 
       # Truncate name for display
@@ -262,8 +321,8 @@ render() {
   echo ""
   echo -e "  ${DIM}─────────────────────────────────────────────────${NC}"
   echo ""
-  echo -e "  ${BOLD}[↑↓]${NC} select  ${BOLD}[Enter]${NC} attach  ${BOLD}[n]${NC}ew  ${BOLD}[k]${NC}ill  ${BOLD}[p]${NC}orts  ${BOLD}[d]${NC}iff"
-  echo -e "  ${BOLD}[m]${NC}erge/PR  ${BOLD}[l]${NC}azygit  ${BOLD}[s]${NC}hell  ${BOLD}[u]${NC}rl  ${BOLD}[i]${NC}nfo  ${BOLD}[a]${NC}ll  ${BOLD}[r]${NC}efresh  ${BOLD}[q]${NC}uit"
+  echo -e "  ${BOLD}[↑↓]${NC} select  ${BOLD}[Enter]${NC} attach  ${BOLD}[${KEY_NEW}]${NC}ew  ${BOLD}[${KEY_KILL}]${NC}ill  ${BOLD}[p]${NC}orts  ${BOLD}[d]${NC}iff"
+  echo -e "  ${BOLD}[m]${NC}erge/PR  ${BOLD}[${KEY_LAZYGIT}]${NC}azygit  ${BOLD}[s]${NC}hell  ${BOLD}[u]${NC}rl  ${BOLD}[i]${NC}nfo  ${BOLD}[a]${NC}ll  ${BOLD}[r]${NC}efresh  ${BOLD}[q]${NC}uit"
   echo ""
 }
 
@@ -528,12 +587,30 @@ main() {
     exit 1
   fi
 
+  # Load config (keybinds, theme, refresh interval)
+  load_config
+
   while true; do
     render
 
     # Read single keypress (with timeout for auto-refresh)
     local key=""
-    read -rsn1 -t 5 key || true
+    read -rsn1 -t "$REFRESH_SECONDS" key || true
+
+    # Dynamic keybind matching for configurable keys
+    local key_lower
+    key_lower=$(echo "$key" | tr '[:upper:]' '[:lower:]')
+
+    if [ "$key_lower" = "$KEY_NEW" ]; then
+      action_new
+      continue
+    elif [ "$key_lower" = "$KEY_KILL" ]; then
+      action_kill
+      continue
+    elif [ "$key_lower" = "$KEY_LAZYGIT" ]; then
+      action_lazygit
+      continue
+    fi
 
     case "$key" in
       a|A)
@@ -549,17 +626,8 @@ main() {
         # Enter key — attach to selected session
         action_attach
         ;;
-      n|N)
-        action_new
-        ;;
-      k|K)
-        action_kill
-        ;;
       s|S)
         action_shell
-        ;;
-      l|L)
-        action_lazygit
         ;;
       u|U)
         action_url

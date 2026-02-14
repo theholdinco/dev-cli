@@ -51,6 +51,28 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+GLOBAL_CONFIG="$CONFIG_DIR/config.json"
+
+DEFAULT_CONFIG='{
+  "tmux": {
+    "windows": [
+      {"name": "agent", "command": null},
+      {"name": "shell", "command": "bash"},
+      {"name": "server", "command": null}
+    ],
+    "default_window": 1
+  },
+  "hub": {
+    "keybinds": {"attach": "", "new": "n", "kill": "k", "lazygit": "l"},
+    "theme": {"accent": "cyan", "alive": "green", "dead": "red"},
+    "refresh_seconds": 5
+  },
+  "defaults": {
+    "agents": ["claude"],
+    "package_manager": "npm"
+  }
+}'
+
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 die() { echo -e "${RED}Error:${NC} $1" >&2; exit 1; }
@@ -59,8 +81,87 @@ info() { echo -e "${BLUE}→${NC} $1"; }
 warn() { echo -e "${YELLOW}!${NC} $1"; }
 
 ensure_dirs() {
-  mkdir -p "$CONFIG_DIR" "$LOG_DIR"
+  mkdir -p "$CONFIG_DIR" "$LOG_DIR" "$CONFIG_DIR/projects"
   [ -f "$PORT_REGISTRY" ] || echo '{}' > "$PORT_REGISTRY"
+  [ -f "$GLOBAL_CONFIG" ] || echo "$DEFAULT_CONFIG" > "$GLOBAL_CONFIG"
+}
+
+# Read a config value with jq path, falling back to default config, then to a provided default
+get_config_value() {
+  local key="$1" default="${2:-}"
+  local val=""
+  if [ -f "$GLOBAL_CONFIG" ]; then
+    val=$(jq -r "$key // empty" "$GLOBAL_CONFIG" 2>/dev/null)
+  fi
+  if [ -z "$val" ]; then
+    val=$(echo "$DEFAULT_CONFIG" | jq -r "$key // empty" 2>/dev/null)
+  fi
+  if [ -z "$val" ]; then
+    echo "$default"
+  else
+    echo "$val"
+  fi
+}
+
+# Return tmux windows JSON array: project config > global config > defaults
+get_tmux_windows() {
+  local project="${1:-}"
+  local windows=""
+  if [ -n "$project" ] && [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
+    windows=$(jq -r '.tmux.windows // empty' "$CONFIG_DIR/projects/${project}.json" 2>/dev/null)
+  fi
+  if [ -z "$windows" ] || [ "$windows" = "null" ]; then
+    windows=$(jq -r '.tmux.windows // empty' "$GLOBAL_CONFIG" 2>/dev/null)
+  fi
+  if [ -z "$windows" ] || [ "$windows" = "null" ]; then
+    windows=$(echo "$DEFAULT_CONFIG" | jq -r '.tmux.windows')
+  fi
+  echo "$windows"
+}
+
+# Create tmux windows from config, replacing the hardcoded 3-window setup
+# Args: session_name project worktree_path env_prefix agent_cmd run_cmd frontend backend ip
+create_tmux_windows() {
+  local session="$1" project="$2" worktree="$3" env_prefix="$4" agent_cmd="$5"
+  local run_cmd="$6" frontend="$7" backend="$8" ip="$9"
+
+  local windows
+  windows=$(get_tmux_windows "$project")
+  local win_count
+  win_count=$(echo "$windows" | jq 'length')
+
+  local first=true
+  for i in $(seq 0 $((win_count - 1))); do
+    local win_name win_command
+    win_name=$(echo "$windows" | jq -r ".[$i].name")
+    win_command=$(echo "$windows" | jq -r ".[$i].command // empty")
+
+    local resolved_cmd=""
+    if [ "$win_name" = "agent" ]; then
+      resolved_cmd="${env_prefix}${agent_cmd}"
+    elif [ "$win_name" = "server" ]; then
+      if [ -n "$run_cmd" ]; then
+        resolved_cmd="cd $worktree && echo 'Frontend: http://$ip:$frontend | Backend: http://$ip:$backend' && echo 'Running: $run_cmd' && echo '─────────────────────────────────────' && $run_cmd; bash"
+      else
+        resolved_cmd="cd $worktree && echo 'Frontend: http://$ip:$frontend | Backend: http://$ip:$backend' && echo 'Run your dev server here.' && bash"
+      fi
+    elif [ -n "$win_command" ]; then
+      resolved_cmd="cd $worktree && $win_command"
+    else
+      resolved_cmd="cd $worktree && bash"
+    fi
+
+    if [ "$first" = true ]; then
+      tmux new-session -d -s "$session" -n "$win_name" "$resolved_cmd"
+      first=false
+    else
+      tmux new-window -t "$session" -n "$win_name" "$resolved_cmd"
+    fi
+  done
+
+  local default_win
+  default_win=$(get_config_value '.tmux.default_window' '1')
+  tmux select-window -t "$session:$default_win"
 }
 
 # Get Tailscale IP (fallback to hostname -I)
@@ -858,32 +959,17 @@ cmd_new() {
   esac
 
   # Set port env vars on tmux session so all windows/panes inherit them.
-  # We use DEV_* prefixed vars (not PORT) to avoid overriding per-package
-  # .env files — monorepo packages each set their own PORT via .env.
   local ip
   ip=$(get_ip)
 
-  tmux new-session -d -s "$name" -n "agent" "${env_prefix}${agent_cmd}"
+  create_tmux_windows "$name" "$project" "$worktree_path" "$env_prefix" "$agent_cmd" "$run_cmd" "$wt_frontend" "$wt_backend" "$ip"
+
   tmux set-environment -t "$name" DEV_FRONTEND_PORT "$wt_frontend"
   tmux set-environment -t "$name" DEV_BACKEND_PORT "$wt_backend"
   tmux set-environment -t "$name" DEV_SUPA_API_PORT "$wt_supa_api"
   tmux set-environment -t "$name" DEV_SUPA_DB_PORT "$wt_supa_db"
   tmux set-environment -t "$name" DEV_SUPA_STUDIO_PORT "$wt_supa_studio"
   tmux set-environment -t "$name" DEV_SLOT "$slot"
-
-  # Add a second window for manual shell access
-  tmux new-window -t "$name" -n "shell" "cd $worktree_path && bash"
-
-  # Add a third window for dev server
-  if [ -n "$run_cmd" ]; then
-    # Auto-start the dev server with the configured command
-    tmux new-window -t "$name" -n "server" "cd $worktree_path && echo 'Frontend: http://$ip:$wt_frontend | Backend: http://$ip:$wt_backend' && echo 'Running: $run_cmd' && echo '─────────────────────────────────────' && $run_cmd; bash"
-  else
-    tmux new-window -t "$name" -n "server" "cd $worktree_path && echo 'Frontend: http://$ip:$wt_frontend | Backend: http://$ip:$wt_backend' && echo 'Run: pnpm dev (backend reads PORT from .env, frontend may need: PORT=$wt_frontend pnpm dev:frontend)' && bash"
-  fi
-
-  # Select the agent window
-  tmux select-window -t "$name:1"
 
   local frontend backend
   frontend="$wt_frontend"
@@ -1952,26 +2038,24 @@ cmd_restart() {
   supa_db=$(get_session_field "$match" "ports.supa_db")
   supa_studio=$(get_session_field "$match" "ports.supa_studio")
 
-  tmux new-session -d -s "$match" -n "agent" "${env_prefix}${agent_cmd}"
+  # Resolve project name and run command
+  local project
+  project=$(get_session_field "$match" "project")
+  local run_cmd=""
+  if [ -n "$project" ] && [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
+    run_cmd=$(jq -r '.run_cmd // empty' "$CONFIG_DIR/projects/${project}.json")
+  fi
+
+  local ip
+  ip=$(get_ip)
+  create_tmux_windows "$match" "$project" "$worktree_path" "$env_prefix" "$agent_cmd" "$run_cmd" "$frontend" "$backend" "$ip"
+
   tmux set-environment -t "$match" DEV_FRONTEND_PORT "$frontend"
   tmux set-environment -t "$match" DEV_BACKEND_PORT "$backend"
   tmux set-environment -t "$match" DEV_SUPA_API_PORT "$supa_api"
   tmux set-environment -t "$match" DEV_SUPA_DB_PORT "$supa_db"
   tmux set-environment -t "$match" DEV_SUPA_STUDIO_PORT "$supa_studio"
   tmux set-environment -t "$match" DEV_SLOT "$slot"
-  tmux new-window -t "$match" -n "shell" "cd $worktree_path && bash"
-  # Resolve run command from project config
-  local run_cmd=""
-  if [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
-    run_cmd=$(jq -r '.run_cmd // empty' "$CONFIG_DIR/projects/${project}.json")
-  fi
-
-  if [ -n "$run_cmd" ]; then
-    tmux new-window -t "$match" -n "server" "cd $worktree_path && echo 'Frontend port: $frontend | Backend port: $backend' && echo 'Running: $run_cmd' && echo '─────────────────────────────────────' && $run_cmd; bash"
-  else
-    tmux new-window -t "$match" -n "server" "cd $worktree_path && echo 'Frontend port: $frontend | Backend port: $backend — run: npm run dev' && bash"
-  fi
-  tmux select-window -t "$match:1"
 
   log "Session '$match' restarted with $agent"
 }
@@ -2151,6 +2235,263 @@ cmd_update() {
   log "Updated to latest version"
 }
 
+cmd_config() {
+  local subcmd="${2:-}"
+
+  case "$subcmd" in
+    show)
+      echo ""
+      echo -e "  ${BOLD}Current Configuration${NC}"
+      echo ""
+      echo -e "  ${CYAN}Global config:${NC} $GLOBAL_CONFIG"
+      echo ""
+      if [ -f "$GLOBAL_CONFIG" ]; then
+        jq '.' "$GLOBAL_CONFIG" | sed 's/^/  /'
+      else
+        echo "$DEFAULT_CONFIG" | jq '.' | sed 's/^/  /'
+      fi
+      echo ""
+      ;;
+
+    reset)
+      echo "$DEFAULT_CONFIG" > "$GLOBAL_CONFIG"
+      log "Configuration reset to defaults"
+      ;;
+
+    project)
+      local pname="${3:-}"
+      [ -z "$pname" ] && die "Usage: dev config project <name> [--json]"
+      local pconfig="$CONFIG_DIR/projects/${pname}.json"
+
+      if [ "${4:-}" = "--json" ]; then
+        if [ ! -f "$pconfig" ]; then
+          echo '{}' > "$pconfig"
+        fi
+        ${EDITOR:-vi} "$pconfig"
+        log "Project config updated for '$pname'"
+      else
+        echo ""
+        echo -e "  ${BOLD}Configure project: $pname${NC}"
+        echo ""
+
+        local cur_pkg="" cur_run="" cur_agent=""
+        if [ -f "$pconfig" ]; then
+          cur_pkg=$(jq -r '.pkg_manager // empty' "$pconfig")
+          cur_run=$(jq -r '.run_cmd // empty' "$pconfig")
+          cur_agent=$(jq -r '.default_agent // empty' "$pconfig")
+        fi
+
+        echo -e "  Package manager:"
+        echo "    1) npm"
+        echo "    2) pnpm"
+        echo "    3) yarn"
+        local default_pkg_num=1
+        case "${cur_pkg:-npm}" in
+          pnpm) default_pkg_num=2 ;;
+          yarn) default_pkg_num=3 ;;
+        esac
+        read -rp "  Select [$default_pkg_num]: " pkg_choice
+        local pkg_mgr
+        case "${pkg_choice:-$default_pkg_num}" in
+          2) pkg_mgr="pnpm" ;;
+          3) pkg_mgr="yarn" ;;
+          *) pkg_mgr="npm" ;;
+        esac
+
+        echo ""
+        echo -e "  Default agent:"
+        echo "    1) claude"
+        echo "    2) codex"
+        echo "    3) none"
+        local default_agent_num=1
+        case "${cur_agent:-claude}" in
+          codex) default_agent_num=2 ;;
+          none) default_agent_num=3 ;;
+        esac
+        read -rp "  Select [$default_agent_num]: " agent_choice
+        local def_agent
+        case "${agent_choice:-$default_agent_num}" in
+          2) def_agent="codex" ;;
+          3) def_agent="none" ;;
+          *) def_agent="claude" ;;
+        esac
+
+        echo ""
+        read -rp "  Dev server command [${cur_run:-none}]: " new_run
+        new_run="${new_run:-$cur_run}"
+
+        echo ""
+        echo -e "  Tmux window layout (leave blank to use global config):"
+        read -rp "  Custom window names (comma-separated, e.g. agent,shell,server,logs) []: " win_input
+
+        local tmp
+        tmp=$(mktemp)
+        local base='{}'
+        [ -f "$pconfig" ] && base=$(cat "$pconfig")
+
+        echo "$base" | jq \
+          --arg pkg "$pkg_mgr" \
+          --arg agent "$def_agent" \
+          --arg run "$new_run" \
+          '.pkg_manager = $pkg | .default_agent = $agent | (if $run != "" then .run_cmd = $run else del(.run_cmd) end)' > "$tmp"
+
+        if [ -n "$win_input" ]; then
+          local windows_json="["
+          local first=true
+          IFS=',' read -ra WIN_NAMES <<< "$win_input"
+          for wn in "${WIN_NAMES[@]}"; do
+            wn=$(echo "$wn" | xargs)
+            if [ "$first" = true ]; then first=false; else windows_json+=","; fi
+            if [ "$wn" = "agent" ]; then
+              windows_json+="{\"name\":\"agent\",\"command\":null}"
+            elif [ "$wn" = "server" ]; then
+              windows_json+="{\"name\":\"server\",\"command\":null}"
+            elif [ "$wn" = "shell" ]; then
+              windows_json+="{\"name\":\"shell\",\"command\":\"bash\"}"
+            else
+              windows_json+="{\"name\":\"$wn\",\"command\":\"bash\"}"
+            fi
+          done
+          windows_json+="]"
+          local tmp2
+          tmp2=$(mktemp)
+          jq --argjson wins "$windows_json" '.tmux.windows = $wins' "$tmp" > "$tmp2"
+          mv "$tmp2" "$tmp"
+        fi
+
+        mv "$tmp" "$pconfig"
+        log "Project config saved for '$pname'"
+        echo ""
+        jq '.' "$pconfig" | sed 's/^/  /'
+        echo ""
+      fi
+      ;;
+
+    --json)
+      ${EDITOR:-vi} "$GLOBAL_CONFIG"
+      log "Global config updated"
+      ;;
+
+    "")
+      echo ""
+      echo -e "  ${BOLD}Configure dev-cli${NC}"
+      echo ""
+
+      local cur_agent
+      cur_agent=$(get_config_value '.defaults.agents[0]' 'claude')
+      echo -e "  ${CYAN}1. Default agent${NC}"
+      echo "    1) claude"
+      echo "    2) codex"
+      echo "    3) none"
+      local default_num=1
+      case "$cur_agent" in
+        codex) default_num=2 ;;
+        none) default_num=3 ;;
+      esac
+      read -rp "  Select [$default_num]: " choice
+      local new_agent
+      case "${choice:-$default_num}" in
+        2) new_agent="codex" ;;
+        3) new_agent="none" ;;
+        *) new_agent="claude" ;;
+      esac
+
+      echo ""
+      local cur_pkg
+      cur_pkg=$(get_config_value '.defaults.package_manager' 'npm')
+      echo -e "  ${CYAN}2. Default package manager${NC}"
+      echo "    1) npm"
+      echo "    2) pnpm"
+      echo "    3) yarn"
+      default_num=1
+      case "$cur_pkg" in
+        pnpm) default_num=2 ;;
+        yarn) default_num=3 ;;
+      esac
+      read -rp "  Select [$default_num]: " choice
+      local new_pkg
+      case "${choice:-$default_num}" in
+        2) new_pkg="pnpm" ;;
+        3) new_pkg="yarn" ;;
+        *) new_pkg="npm" ;;
+      esac
+
+      echo ""
+      local cur_accent
+      cur_accent=$(get_config_value '.hub.theme.accent' 'cyan')
+      echo -e "  ${CYAN}3. Hub accent color${NC}"
+      echo "    1) cyan  2) green  3) blue  4) yellow  5) red"
+      local accent_num=1
+      case "$cur_accent" in
+        green) accent_num=2 ;; blue) accent_num=3 ;; yellow) accent_num=4 ;; red) accent_num=5 ;;
+      esac
+      read -rp "  Select [$accent_num]: " choice
+      local new_accent
+      case "${choice:-$accent_num}" in
+        2) new_accent="green" ;; 3) new_accent="blue" ;; 4) new_accent="yellow" ;; 5) new_accent="red" ;;
+        *) new_accent="cyan" ;;
+      esac
+
+      echo ""
+      local cur_refresh
+      cur_refresh=$(get_config_value '.hub.refresh_seconds' '5')
+      echo -e "  ${CYAN}4. Hub refresh interval (seconds)${NC}"
+      read -rp "  Seconds [$cur_refresh]: " new_refresh
+      new_refresh="${new_refresh:-$cur_refresh}"
+
+      echo ""
+      echo -e "  ${CYAN}5. Tmux window layout${NC}"
+      local cur_windows
+      cur_windows=$(get_tmux_windows "")
+      local cur_win_names
+      cur_win_names=$(echo "$cur_windows" | jq -r '.[].name' | paste -sd',' -)
+      echo -e "  Current: $cur_win_names"
+      read -rp "  Window names (comma-separated) [$cur_win_names]: " win_input
+      win_input="${win_input:-$cur_win_names}"
+
+      local windows_json="["
+      local first=true
+      IFS=',' read -ra WIN_NAMES <<< "$win_input"
+      for wn in "${WIN_NAMES[@]}"; do
+        wn=$(echo "$wn" | xargs)
+        if [ "$first" = true ]; then first=false; else windows_json+=","; fi
+        if [ "$wn" = "agent" ]; then
+          windows_json+="{\"name\":\"agent\",\"command\":null}"
+        elif [ "$wn" = "server" ]; then
+          windows_json+="{\"name\":\"server\",\"command\":null}"
+        elif [ "$wn" = "shell" ]; then
+          windows_json+="{\"name\":\"shell\",\"command\":\"bash\"}"
+        else
+          windows_json+="{\"name\":\"$wn\",\"command\":\"bash\"}"
+        fi
+      done
+      windows_json+="]"
+
+      local tmp
+      tmp=$(mktemp)
+      jq \
+        --arg agent "$new_agent" \
+        --arg pkg "$new_pkg" \
+        --arg accent "$new_accent" \
+        --argjson refresh "$new_refresh" \
+        --argjson wins "$windows_json" \
+        '.defaults.agents = [$agent] | .defaults.package_manager = $pkg | .hub.theme.accent = $accent | .hub.refresh_seconds = $refresh | .tmux.windows = $wins' \
+        "$GLOBAL_CONFIG" > "$tmp"
+      mv "$tmp" "$GLOBAL_CONFIG"
+
+      echo ""
+      log "Configuration saved"
+      echo ""
+      jq '.' "$GLOBAL_CONFIG" | sed 's/^/  /'
+      echo ""
+      ;;
+
+    *)
+      die "Unknown config subcommand: $subcmd. Use: dev config [show|reset|project <name>|--json]"
+      ;;
+  esac
+}
+
 cmd_help() {
   cat << 'HELPEOF'
 
@@ -2208,6 +2549,14 @@ cmd_help() {
     dev img grab <url>                      Download image from URL
     dev img path [filename]                 Print full path (latest if omitted)
     dev img clean [days]                    Remove old images (default: 7 days)
+
+  CONFIGURATION
+    dev config                              Interactive configuration walk-through
+    dev config --json                       Edit raw config JSON in $EDITOR
+    dev config show                         Pretty-print current effective config
+    dev config reset                        Reset configuration to defaults
+    dev config project <name>               Interactive config for a project
+    dev config project <name> --json        Edit project config JSON in $EDITOR
 
   MAINTENANCE
     dev gc                                  Clean up dead sessions
@@ -2275,6 +2624,7 @@ case "${1:-help}" in
   sync)      cmd_sync "$@" ;;
   gc)        cmd_gc ;;
   template)  cmd_template "$@" ;;
+  config)    cmd_config "$@" ;;
   doctor)    cmd_doctor ;;
   help|-h|--help) cmd_help ;;
   *)         die "Unknown command: $1. Run 'dev help' for usage." ;;
