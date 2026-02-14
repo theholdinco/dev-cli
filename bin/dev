@@ -8,7 +8,7 @@
 # Usage:
 #   dev init                                Interactive project setup (recommended)
 #   dev setup <project> <github-ssh-url>    One-time project setup (bare clone)
-#   dev new <project> <branch> [options]    Create worktree + launch agent
+#   dev new <project> <branch> [options]    Create worktree + launch agent + auto-run dev server
 #   dev ls                                  List all active sessions
 #   dev attach <session>                    Attach to a tmux session
 #   dev kill <session>                      Tear down session + worktree
@@ -341,6 +341,14 @@ cmd_init() {
     *) pkg_manager="npm" ;;
   esac
 
+  # Dev server command
+  echo ""
+  echo -e "  ${BOLD}Dev server command${NC}"
+  echo -e "  ${DIM}Command to auto-run in the server window (e.g., pnpm dev, npm run dev)${NC}"
+  echo -e "  ${DIM}Leave empty to skip (you can always start it manually)${NC}"
+  local run_cmd=""
+  read -rp "  Run command: " run_cmd
+
   # Monorepo detection
   local is_monorepo="n"
   local packages=()
@@ -625,6 +633,7 @@ TMPL_SUPA
   "has_backend": "$has_backend",
   "has_supabase": "$has_supabase",
   "pkg_manager": "$pkg_manager",
+  "run_cmd": "$run_cmd",
   "created": "$(date -Iseconds)"
 }
 PCONF
@@ -692,7 +701,7 @@ cmd_setup() {
 }
 
 cmd_new() {
-  local project="${2:-}" branch="${3:-}" agent="claude"
+  local project="${2:-}" branch="${3:-}" agent="claude" run_cmd=""
   shift 2 || true
 
   # Parse options
@@ -700,6 +709,8 @@ cmd_new() {
     case "${1:-}" in
       --agent) agent="${2:-claude}"; shift 2 ;;
       --agent=*) agent="${1#*=}"; shift ;;
+      --run) run_cmd="${2:-}"; shift 2 ;;
+      --run=*) run_cmd="${1#*=}"; shift ;;
       *) shift ;;
     esac
   done
@@ -806,6 +817,11 @@ cmd_new() {
     warn "No package.json found, skipping install"
   fi
 
+  # Resolve run command: --run flag > project config > none
+  if [ -z "$run_cmd" ] && [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
+    run_cmd=$(jq -r '.run_cmd // empty' "$CONFIG_DIR/projects/${project}.json")
+  fi
+
   # Register in port registry
   register_session "$name" "$project" "$branch" "$slot" "$agent" "$worktree_path"
 
@@ -847,8 +863,13 @@ cmd_new() {
   # Add a second window for manual shell access
   tmux new-window -t "$name" -n "shell" "cd $worktree_path && bash"
 
-  # Add a third window for dev server (not started automatically)
-  tmux new-window -t "$name" -n "server" "cd $worktree_path && echo 'Frontend port: $wt_frontend | Backend port: $wt_backend — run: npm run dev' && bash"
+  # Add a third window for dev server
+  if [ -n "$run_cmd" ]; then
+    # Auto-start the dev server with the configured command
+    tmux new-window -t "$name" -n "server" "cd $worktree_path && echo 'Frontend: http://$ip:$wt_frontend | Backend: http://$ip:$wt_backend' && echo 'Running: $run_cmd' && echo '─────────────────────────────────────' && $run_cmd; bash"
+  else
+    tmux new-window -t "$name" -n "server" "cd $worktree_path && echo 'Frontend: http://$ip:$wt_frontend | Backend: http://$ip:$wt_backend' && echo 'Run: pnpm dev (backend reads PORT from .env, frontend may need: PORT=$wt_frontend pnpm dev:frontend)' && bash"
+  fi
 
   # Select the agent window
   tmux select-window -t "$name:1"
@@ -1095,15 +1116,28 @@ cmd_kill() {
   fi
 
   # Remove worktree
+  local branch
+  branch=$(get_session_field "$name" "branch")
+
   if [ -d "$worktree_path" ]; then
     info "Removing worktree..."
     cd "$bare_dir"
     git worktree remove "$worktree_path" --force 2>/dev/null || {
       warn "git worktree remove failed, cleaning up manually"
       rm -rf "$worktree_path"
-      git worktree prune
     }
     log "Worktree removed"
+  fi
+
+  # Always prune stale worktree metadata so the branch is no longer "checked out"
+  cd "$bare_dir"
+  git worktree prune 2>/dev/null || true
+
+  # Delete the local branch (remote branch is untouched)
+  if [ -n "$branch" ]; then
+    if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+      git branch -D "$branch" 2>/dev/null && log "Deleted local branch '$branch'" || warn "Could not delete local branch '$branch'"
+    fi
   fi
 
   # Unregister
@@ -1902,7 +1936,17 @@ cmd_restart() {
   tmux set-environment -t "$match" DEV_SUPA_STUDIO_PORT "$supa_studio"
   tmux set-environment -t "$match" DEV_SLOT "$slot"
   tmux new-window -t "$match" -n "shell" "cd $worktree_path && bash"
-  tmux new-window -t "$match" -n "server" "cd $worktree_path && echo 'Frontend port: $frontend | Backend port: $backend — run: npm run dev' && bash"
+  # Resolve run command from project config
+  local run_cmd=""
+  if [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
+    run_cmd=$(jq -r '.run_cmd // empty' "$CONFIG_DIR/projects/${project}.json")
+  fi
+
+  if [ -n "$run_cmd" ]; then
+    tmux new-window -t "$match" -n "server" "cd $worktree_path && echo 'Frontend port: $frontend | Backend port: $backend' && echo 'Running: $run_cmd' && echo '─────────────────────────────────────' && $run_cmd; bash"
+  else
+    tmux new-window -t "$match" -n "server" "cd $worktree_path && echo 'Frontend port: $frontend | Backend port: $backend — run: npm run dev' && bash"
+  fi
   tmux select-window -t "$match:1"
 
   log "Session '$match' restarted with $agent"
@@ -2096,8 +2140,9 @@ cmd_help() {
     dev help                                Show this help
 
   SESSIONS
-    dev new <project> <branch> [--agent claude|codex|none]
+    dev new <project> <branch> [--agent claude|codex|none] [--run "<cmd>"]
                                             Create worktree + start agent
+                                            --run auto-starts a command in the server window
     dev ls                                  List your active sessions
     dev ls --all                              List all users' sessions
     dev attach [session]                    Attach to tmux session (interactive picker if no arg)
