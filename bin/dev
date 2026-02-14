@@ -2058,7 +2058,7 @@ cmd_update() {
   # Check common repo locations
   local REPO_DIR=""
   for candidate in /opt/dev-cli "$HOME/.dev-cli-repo"; do
-    if [ -d "$candidate/bin/dev" ]; then
+    if [ -f "$candidate/bin/dev" ]; then
       REPO_DIR="$candidate"
       break
     fi
