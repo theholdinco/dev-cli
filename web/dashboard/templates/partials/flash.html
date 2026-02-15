@@ -1,0 +1,23 @@
+<div id="flash" hx-swap-oob="innerHTML:#flash">
+    <div class="flash-message px-4 py-3 rounded-lg shadow-lg border
+        {% if category == 'success' %}bg-green-900/80 border-green-700 text-green-200
+        {% elif category == 'error' %}bg-red-900/80 border-red-700 text-red-200
+        {% else %}bg-blue-900/80 border-blue-700 text-blue-200{% endif %}">
+        {{ message }}
+    </div>
+</div>
+<script>
+    (function() {
+        var flash = document.getElementById("flash");
+        if (flash) {
+            var messages = flash.querySelectorAll(".flash-message");
+            messages.forEach(function(msg) {
+                setTimeout(function() {
+                    msg.style.transition = "opacity 0.5s";
+                    msg.style.opacity = "0";
+                    setTimeout(function() { msg.remove(); }, 500);
+                }, 4000);
+            });
+        }
+    })();
+</script>

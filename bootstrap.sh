@@ -98,6 +98,7 @@ sudo apt install -y \
   software-properties-common \
   python3 \
   python3-pip \
+  python3-venv \
   pkg-config \
   libssl-dev \
   file \

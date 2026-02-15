@@ -1,0 +1,6 @@
+<div class="terminal-output bg-gray-950 rounded-lg p-4 border border-gray-700 max-h-[500px] overflow-y-auto">
+    {% if title %}
+        <h3 class="text-sm font-medium text-gray-400 mb-2">{{ title }}</h3>
+    {% endif %}
+    <pre class="text-sm text-gray-300 whitespace-pre-wrap break-words font-mono">{{ output }}</pre>
+</div>

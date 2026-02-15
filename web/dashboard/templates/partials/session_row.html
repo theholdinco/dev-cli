@@ -1,0 +1,43 @@
+<div class="bg-gray-800 rounded-lg p-4 border border-gray-700 hover:border-gray-600 transition-colors">
+    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div class="flex-1 min-w-0">
+            <div class="flex items-center space-x-3 mb-1">
+                <a href="{{ url_for('sessions.session_detail', name=session.name) }}"
+                   class="text-lg font-semibold text-blue-400 hover:text-blue-300 truncate">
+                    {{ session.name }}
+                </a>
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
+                    {% if session.alive %}bg-green-900 text-green-300 border border-green-700
+                    {% else %}bg-red-900 text-red-300 border border-red-700{% endif %}">
+                    {{ "alive" if session.alive else "dead" }}
+                </span>
+            </div>
+            <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-400">
+                <span>{{ session.project }}</span>
+                <span class="font-mono">{{ session.branch }}</span>
+                <span>Slot {{ session.slot }}</span>
+                <span>{{ session.age }}</span>
+                {% if session.agents %}
+                    <span class="flex items-center space-x-1">
+                        {% for agent in session.agents %}
+                            <span class="inline-flex px-1.5 py-0.5 rounded text-xs bg-blue-900/50 text-blue-400 border border-blue-800">{{ agent }}</span>
+                        {% endfor %}
+                    </span>
+                {% endif %}
+            </div>
+        </div>
+        <div class="flex items-center space-x-2 shrink-0">
+            <a href="{{ url_for('sessions.session_detail', name=session.name) }}"
+               class="bg-gray-700 hover:bg-gray-600 text-gray-200 text-xs px-3 py-1.5 rounded-md transition-colors border border-gray-600">
+                Details
+            </a>
+            <button hx-post="{{ url_for('sessions.kill_session_view', name=session.name) }}"
+                    hx-target="#flash"
+                    hx-swap="innerHTML"
+                    hx-confirm="Kill session '{{ session.name }}'?"
+                    class="bg-red-700 hover:bg-red-600 text-white text-xs px-3 py-1.5 rounded-md transition-colors">
+                Kill
+            </button>
+        </div>
+    </div>
+</div>

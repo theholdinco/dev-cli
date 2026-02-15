@@ -16,6 +16,7 @@ CONFIG_DIR="$HOME/.config/dev-cli"
 PORT_REGISTRY="$CONFIG_DIR/ports.json"
 SECRETS_FILE="$CONFIG_DIR/secrets.env"
 LOG_DIR="$CONFIG_DIR/logs"
+WEB_DIR="$HOME/.local/share/dev-cli/web"
 
 # Port ranges per slot
 BASE_FRONTEND_PORT=3001
@@ -56,6 +57,13 @@ DEFAULT_CONFIG='{
   "defaults": {
     "agents": ["claude"],
     "package_manager": "npm"
+  },
+  "telegram": {
+    "bot_token": "",
+    "allowed_chat_ids": []
+  },
+  "web": {
+    "port": 8080
   }
 }'
 
@@ -1431,7 +1439,7 @@ cmd_logs() {
   [ -z "$match" ] && die "No session matching '$name'"
 
   # Capture tmux pane content
-  tmux capture-pane -t "$match:1" -p -S -100
+  tmux capture-pane -t "$match:0" -p -S -100
 }
 
 cmd_url() {
@@ -1725,7 +1733,8 @@ cmd_send() {
 
   [ -z "$prompt" ] && die "No prompt provided. Usage: dev send <session> <prompt>"
 
-  tmux send-keys -t "$match:1" "$prompt" Enter
+  tmux send-keys -t "$match:0" -l "$prompt"
+  tmux send-keys -t "$match:0" Enter
   log "Sent to $match"
 }
 
@@ -2766,6 +2775,150 @@ cmd_agent() {
   esac
 }
 
+cmd_web() {
+  local subcmd="${2:-help}"
+  case "$subcmd" in
+    setup)
+      info "Setting up web dashboard..."
+      if ! command -v python3 &>/dev/null; then
+        die "python3 is required. Install it first."
+      fi
+      local venv_dir="$CONFIG_DIR/venv"
+      if [ ! -d "$venv_dir" ]; then
+        info "Creating Python virtual environment..."
+        python3 -m venv "$venv_dir"
+      fi
+      info "Installing dependencies..."
+      "$venv_dir/bin/pip" install -q -r "$WEB_DIR/requirements.txt"
+      log "Web dashboard setup complete"
+      ;;
+    start)
+      local port="${3:-$(get_config_value '.web.port' '8080')}"
+      local venv_dir="$CONFIG_DIR/venv"
+      local pid_file="$CONFIG_DIR/web.pid"
+      [ -d "$venv_dir" ] || die "Run 'dev web setup' first"
+      if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+        die "Web dashboard already running (PID $(cat "$pid_file"))"
+      fi
+      info "Starting web dashboard on port $port..."
+      cd "$WEB_DIR"
+      PYTHONPATH="$WEB_DIR" "$venv_dir/bin/gunicorn" \
+        --bind "0.0.0.0:$port" \
+        --workers 2 \
+        --timeout 120 \
+        --pid "$pid_file" \
+        --daemon \
+        --access-logfile "$LOG_DIR/web-access.log" \
+        --error-logfile "$LOG_DIR/web-error.log" \
+        "dashboard.app:create_app()"
+      sleep 1
+      if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+        local ip
+        ip=$(get_ip 2>/dev/null || echo "localhost")
+        log "Web dashboard running at http://${ip}:${port}"
+      else
+        die "Failed to start web dashboard. Check $LOG_DIR/web-error.log"
+      fi
+      ;;
+    stop)
+      local pid_file="$CONFIG_DIR/web.pid"
+      if [ -f "$pid_file" ]; then
+        local pid
+        pid=$(cat "$pid_file")
+        if kill -0 "$pid" 2>/dev/null; then
+          kill "$pid"
+          rm -f "$pid_file"
+          log "Web dashboard stopped"
+        else
+          rm -f "$pid_file"
+          warn "Web dashboard was not running (stale PID file removed)"
+        fi
+      else
+        warn "Web dashboard is not running"
+      fi
+      ;;
+    status)
+      local pid_file="$CONFIG_DIR/web.pid"
+      if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+        local port
+        port=$(get_config_value '.web.port' '8080')
+        local ip
+        ip=$(get_ip 2>/dev/null || echo "localhost")
+        echo -e "${GREEN}●${NC} Web dashboard is running (PID $(cat "$pid_file"))"
+        echo -e "  URL: http://${ip}:${port}"
+      else
+        echo -e "${RED}●${NC} Web dashboard is not running"
+        [ -f "$pid_file" ] && rm -f "$pid_file"
+      fi
+      ;;
+    *)
+      echo "Usage: dev web <setup|start [port]|stop|status>"
+      ;;
+  esac
+}
+
+cmd_bot() {
+  local subcmd="${2:-help}"
+  case "$subcmd" in
+    setup)
+      # Bot uses same venv as web
+      cmd_web setup
+      ;;
+    start)
+      local venv_dir="$CONFIG_DIR/venv"
+      local pid_file="$CONFIG_DIR/bot.pid"
+      [ -d "$venv_dir" ] || die "Run 'dev bot setup' first"
+      local token
+      token=$(get_config_value '.telegram.bot_token' '')
+      [ -n "$token" ] || die "Set telegram.bot_token in $GLOBAL_CONFIG first"
+      if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+        die "Telegram bot already running (PID $(cat "$pid_file"))"
+      fi
+      info "Starting Telegram bot..."
+      cd "$WEB_DIR"
+      PYTHONPATH="$WEB_DIR" nohup "$venv_dir/bin/python" -m bot.app \
+        > "$LOG_DIR/bot.log" 2>&1 &
+      echo $! > "$pid_file"
+      sleep 2
+      if kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+        log "Telegram bot started (PID $(cat "$pid_file"))"
+      else
+        rm -f "$pid_file"
+        die "Failed to start bot. Check $LOG_DIR/bot.log"
+      fi
+      ;;
+    stop)
+      local pid_file="$CONFIG_DIR/bot.pid"
+      if [ -f "$pid_file" ]; then
+        local pid
+        pid=$(cat "$pid_file")
+        if kill -0 "$pid" 2>/dev/null; then
+          kill "$pid"
+          rm -f "$pid_file"
+          log "Telegram bot stopped"
+        else
+          rm -f "$pid_file"
+          warn "Telegram bot was not running (stale PID file removed)"
+        fi
+      else
+        warn "Telegram bot is not running"
+      fi
+      ;;
+    status)
+      local pid_file="$CONFIG_DIR/bot.pid"
+      if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+        echo -e "${GREEN}●${NC} Telegram bot is running (PID $(cat "$pid_file"))"
+      else
+        echo -e "${RED}●${NC} Telegram bot is not running"
+        [ -f "$pid_file" ] && rm -f "$pid_file"
+      fi
+      ;;
+    *)
+      echo "Usage: dev bot <setup|start|stop|status>"
+      ;;
+  esac
+}
+
 cmd_help() {
   cat << 'HELPEOF'
 
@@ -2846,6 +2999,16 @@ cmd_help() {
     dev doctor                              System health check
     dev template <project>                  Edit project hook/template
 
+  WEB & BOT
+    dev web setup                           Install Python deps for dashboard
+    dev web start [port]                    Start web dashboard (default: 8080)
+    dev web stop                            Stop web dashboard
+    dev web status                          Show dashboard status
+    dev bot setup                           Install Python deps for bot
+    dev bot start                           Start Telegram bot
+    dev bot stop                            Stop Telegram bot
+    dev bot status                          Show bot status
+
   SETUP HOOKS (checked in priority order)
     1. <worktree>/.dev/setup.sh             In-repo hook (travels with the code)
     2. ~/.config/dev-cli/hooks/<project>/setup.sh
@@ -2913,6 +3076,8 @@ case "${1:-help}" in
   agent)     cmd_agent "$@" ;;
   stats)     cmd_stats ;;
   doctor)    cmd_doctor ;;
+  web)       cmd_web "$@" ;;
+  bot)       cmd_bot "$@" ;;
   help|-h|--help) cmd_help ;;
   *)         die "Unknown command: $1. Run 'dev help' for usage." ;;
 esac

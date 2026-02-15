@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block title %}Sessions - dev-cli{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold text-white">Sessions</h1>
+    <a href="{{ url_for('sessions.new_session_form') }}"
+       class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-md transition-colors">
+        New Session
+    </a>
+</div>
+
+<div id="session-list-container"
+     hx-ext="sse"
+     sse-connect="{{ url_for('sse.session_stream') }}"
+     sse-swap="sessions"
+     hx-target="#session-list"
+     hx-swap="innerHTML">
+
+    <div id="session-list">
+        {% include "partials/session_list.html" %}
+    </div>
+</div>
+
+{% if not sessions %}
+<div class="text-center py-16">
+    <p class="text-gray-500 text-lg mb-4">No active sessions</p>
+    <a href="{{ url_for('sessions.new_session_form') }}"
+       class="text-blue-400 hover:text-blue-300 underline">Create your first session</a>
+</div>
+{% endif %}
+{% endblock %}

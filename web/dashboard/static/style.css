@@ -1,0 +1,88 @@
+/* Terminal output blocks */
+.terminal-output {
+    font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+    line-height: 1.5;
+}
+
+.terminal-output pre {
+    margin: 0;
+    tab-size: 4;
+}
+
+.terminal-output code {
+    background: transparent;
+    padding: 0;
+}
+
+/* Diff coloring */
+.diff-output {
+    color: #d1d5db;
+}
+
+/* SSE connection indicator */
+.sse-indicator {
+    transition: background-color 0.3s ease;
+}
+
+.sse-indicator.connected {
+    background-color: #22c55e;
+    box-shadow: 0 0 6px rgba(34, 197, 94, 0.5);
+}
+
+.sse-indicator.disconnected {
+    background-color: #6b7280;
+}
+
+/* htmx loading indicator */
+.htmx-indicator {
+    display: none;
+}
+
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator {
+    display: inline-block;
+}
+
+/* Dark scrollbar */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #1f2937;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #4b5563;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #6b7280;
+}
+
+/* Firefox scrollbar */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: #4b5563 #1f2937;
+}
+
+/* Flash message transitions */
+.flash-message {
+    transition: opacity 0.5s ease;
+}
+
+/* Focus styles for dark theme */
+input:focus,
+select:focus,
+textarea:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.5);
+}
+
+/* Ensure textarea resize handle is visible */
+textarea {
+    resize: vertical;
+}
