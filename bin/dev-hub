@@ -195,11 +195,20 @@ get_git_info() {
   fi
 }
 
+# ── Terminal Detection ─────────────────────────────────────
+hub_term_width() { tput cols 2>/dev/null || echo 80; }
+hub_is_compact() { [[ $(hub_term_width) -lt 90 ]]; }
+
 # ── Render ──────────────────────────────────────────────────
 
 render() {
   # Clear screen
   printf '\033[2J\033[H'
+
+  local w
+  w=$(hub_term_width)
+  local compact=false
+  [[ "$w" -lt 90 ]] && compact=true
 
   local ip
   ip=$(get_ip)
@@ -210,14 +219,18 @@ render() {
 
   # Header
   echo ""
-  echo -e "  ${BOLD}${THEME_ACCENT}DEV HUB${NC}                                      ${DIM}$now${NC}"
+  if [ "$compact" = true ]; then
+    echo -e "  ${BOLD}${THEME_ACCENT}DEV HUB${NC}  ${DIM}$now${NC}"
+  else
+    echo -e "  ${BOLD}${THEME_ACCENT}DEV HUB${NC}                                      ${DIM}$now${NC}"
+  fi
   local filter_label
   if [ "$SHOW_ALL" = true ]; then
     filter_label="all users"
   else
     filter_label="$USER only"
   fi
-  echo -e "  ${DIM}$count/$MAX_SLOTS slots used · $ip · $filter_label${NC}"
+  echo -e "  ${DIM}$count/$MAX_SLOTS slots · $ip · $filter_label${NC}"
   echo ""
 
   # Build active sessions list (index-based selection, not slot-based)
@@ -270,20 +283,34 @@ render() {
         status_icon="${THEME_DEAD}●${NC}"
       fi
 
-      # Truncate name for display
-      local display_name
-      display_name=$(printf "%-24s" "$name")
-
-      local owner_badge=""
-      if [ "$SHOW_ALL" = true ] && [ -n "$owner" ]; then
-        owner_badge="${DIM}[$owner]${NC} "
-      fi
-
-      if [ "$idx" -eq "$SELECTED" ]; then
-        selected_name="$name"
-        echo -e "  ${BG_SELECT}${BOLD} $status_icon $display_name ${owner_badge}${agent}  :${frontend}  ${DIM}${age}${NC}${BG_SELECT} ${git_info:-} ${NC}"
+      if [ "$compact" = true ]; then
+        # Compact: 2-line card layout
+        local short_name
+        short_name=$(echo "$name" | cut -c1-$((w - 6)))
+        if [ "$idx" -eq "$SELECTED" ]; then
+          selected_name="$name"
+          echo -e "  ${BG_SELECT}${BOLD} $status_icon $short_name${NC}"
+          echo -e "  ${BG_SELECT}   ${DIM}$agent :${frontend} ${age}${NC}${BG_SELECT} ${git_info:-}${NC}"
+        else
+          echo -e "   $status_icon ${BOLD}$short_name${NC}"
+          echo -e "     ${DIM}$agent :${frontend} ${age} ${git_info:-}${NC}"
+        fi
       else
-        echo -e "   $status_icon ${display_name} ${owner_badge}${DIM}${agent}  :${frontend}  ${age} ${git_info:-}${NC}"
+        # Wide: single-line layout
+        local display_name
+        display_name=$(printf "%-24s" "$name")
+
+        local owner_badge=""
+        if [ "$SHOW_ALL" = true ] && [ -n "$owner" ]; then
+          owner_badge="${DIM}[$owner]${NC} "
+        fi
+
+        if [ "$idx" -eq "$SELECTED" ]; then
+          selected_name="$name"
+          echo -e "  ${BG_SELECT}${BOLD} $status_icon $display_name ${owner_badge}${agent}  :${frontend}  ${DIM}${age}${NC}${BG_SELECT} ${git_info:-} ${NC}"
+        else
+          echo -e "   $status_icon ${display_name} ${owner_badge}${DIM}${agent}  :${frontend}  ${age} ${git_info:-}${NC}"
+        fi
       fi
     done <<< "$active_sessions"
   fi
@@ -291,26 +318,37 @@ render() {
   # Preview
   echo ""
   if [ -n "$selected_name" ]; then
-    echo -e "  ${DIM}── Preview: ${NC}${BOLD}$selected_name${NC} ${DIM}$( printf '─%.0s' $(seq 1 $((40 - ${#selected_name}))) )${NC}"
+    local sep_len=$((w - 16 - ${#selected_name}))
+    [ "$sep_len" -lt 4 ] && sep_len=4
+    echo -e "  ${DIM}── Preview: ${NC}${BOLD}$selected_name${NC} ${DIM}$( printf '─%.0s' $(seq 1 "$sep_len") )${NC}"
     echo ""
     local preview
     preview=$(get_preview "$selected_name")
     while IFS= read -r line; do
-      # Indent and dim the preview
       echo -e "  ${DIM}│${NC} $line"
     done <<< "$preview"
   else
-    echo -e "  ${DIM}── No session selected ──────────────────────────${NC}"
+    local sep_len=$((w - 4))
+    [ "$sep_len" -lt 20 ] && sep_len=20
+    echo -e "  ${DIM}$( printf '─%.0s' $(seq 1 "$sep_len") )${NC}"
     echo ""
     echo -e "  ${DIM}│ Press [n] to create a new session${NC}"
   fi
 
   # Footer
   echo ""
-  echo -e "  ${DIM}─────────────────────────────────────────────────${NC}"
+  local sep_len=$((w - 4))
+  [ "$sep_len" -lt 20 ] && sep_len=20
+  echo -e "  ${DIM}$( printf '─%.0s' $(seq 1 "$sep_len") )${NC}"
   echo ""
-  echo -e "  ${BOLD}[↑↓]${NC} select  ${BOLD}[Enter]${NC} attach  ${BOLD}[${KEY_NEW}]${NC}ew  ${BOLD}[${KEY_KILL}]${NC}ill  ${BOLD}[p]${NC}orts  ${BOLD}[d]${NC}iff  ${BOLD}[+]${NC} add agent"
-  echo -e "  ${BOLD}[m]${NC}erge/PR  ${BOLD}[${KEY_LAZYGIT}]${NC}azygit  ${BOLD}[s]${NC}hell  ${BOLD}[u]${NC}rl  ${BOLD}[i]${NC}nfo  ${BOLD}[a]${NC}ll  ${BOLD}[r]${NC}efresh  ${BOLD}[q]${NC}uit"
+  if [ "$compact" = true ]; then
+    echo -e "  ${BOLD}[↑↓]${NC}sel ${BOLD}[⏎]${NC}attach ${BOLD}[${KEY_NEW}]${NC}ew ${BOLD}[${KEY_KILL}]${NC}ill"
+    echo -e "  ${BOLD}[p]${NC}orts ${BOLD}[d]${NC}iff ${BOLD}[s]${NC}hell ${BOLD}[u]${NC}rl"
+    echo -e "  ${BOLD}[m]${NC}erge ${BOLD}[i]${NC}nfo ${BOLD}[a]${NC}ll ${BOLD}[q]${NC}uit"
+  else
+    echo -e "  ${BOLD}[↑↓]${NC} select  ${BOLD}[Enter]${NC} attach  ${BOLD}[${KEY_NEW}]${NC}ew  ${BOLD}[${KEY_KILL}]${NC}ill  ${BOLD}[p]${NC}orts  ${BOLD}[d]${NC}iff  ${BOLD}[+]${NC} add agent"
+    echo -e "  ${BOLD}[m]${NC}erge/PR  ${BOLD}[${KEY_LAZYGIT}]${NC}azygit  ${BOLD}[s]${NC}hell  ${BOLD}[u]${NC}rl  ${BOLD}[i]${NC}nfo  ${BOLD}[a]${NC}ll  ${BOLD}[r]${NC}efresh  ${BOLD}[q]${NC}uit"
+  fi
   echo ""
 }
 
@@ -612,6 +650,9 @@ main() {
 
   # Load config (keybinds, theme, refresh interval)
   load_config
+
+  # Re-render on terminal resize
+  trap 'render' WINCH
 
   while true; do
     render
