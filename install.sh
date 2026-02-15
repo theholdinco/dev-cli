@@ -2,10 +2,7 @@
 ###############################################################################
 # dev-cli installer
 #
-# Install:
-#   curl -fsSL https://raw.githubusercontent.com/YOUR_ORG/dev-cli/main/install.sh | bash
-#
-# Or from a cloned repo:
+# Install from a cloned repo:
 #   ./install.sh
 #
 # What it does:
@@ -135,7 +132,7 @@ _dev() {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
   # All available commands
-  commands="init setup new ls attach kill hub dashboard ports logs url supabase pr shell worktree img projects update help status restart send diff sync gc template doctor"
+  commands="init setup new ls attach kill hub dashboard ports logs url supabase pr shell worktree img projects update help status restart send diff sync gc template config agent stats doctor"
 
   # Commands that take a session name as argument
   session_cmds="attach kill logs url shell pr status restart send diff sync"
