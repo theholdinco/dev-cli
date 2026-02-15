@@ -1,0 +1,43 @@
+<div class="mb-6">
+    <h1 class="text-2xl font-bold text-white mb-4">Port Allocations</h1>
+
+    <div class="overflow-x-auto">
+        <table class="w-full text-sm text-left">
+            <thead class="text-xs text-gray-400 uppercase bg-gray-800 border-b border-gray-700">
+                <tr>
+                    <th class="px-4 py-3">Session</th>
+                    <th class="px-4 py-3">Slot</th>
+                    <th class="px-4 py-3">Frontend</th>
+                    <th class="px-4 py-3">Backend</th>
+                    <th class="px-4 py-3">Status</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-700">
+                {% for port in ports %}
+                <tr class="bg-gray-800/50 hover:bg-gray-700/50 transition-colors">
+                    <td class="px-4 py-3">
+                        <a href="{{ url_for('sessions.session_detail', name=port.name) }}"
+                           class="text-blue-400 hover:text-blue-300 font-medium">
+                            {{ port.name }}
+                        </a>
+                    </td>
+                    <td class="px-4 py-3 text-gray-300">{{ port.slot }}</td>
+                    <td class="px-4 py-3 font-mono text-gray-300">{{ port.frontend }}</td>
+                    <td class="px-4 py-3 font-mono text-gray-300">{{ port.backend }}</td>
+                    <td class="px-4 py-3">
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
+                            {% if port.status == 'alive' %}bg-green-900 text-green-300 border border-green-700
+                            {% else %}bg-red-900 text-red-300 border border-red-700{% endif %}">
+                            {{ port.status }}
+                        </span>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="5" class="px-4 py-8 text-center text-gray-500">No active port allocations</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>

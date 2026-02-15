@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}dev-cli Dashboard{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        surface: {
+                            DEFAULT: '#111827',
+                            light: '#1f2937',
+                            lighter: '#374151',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen flex flex-col" hx-headers='{"X-Requested-With": "XMLHttpRequest"}'>
+    {% include "components/nav.html" %}
+
+    <div id="flash" class="fixed top-16 right-4 z-50 space-y-2 w-96">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash-message px-4 py-3 rounded-lg shadow-lg border
+                        {% if category == 'success' %}bg-green-900/80 border-green-700 text-green-200
+                        {% elif category == 'error' %}bg-red-900/80 border-red-700 text-red-200
+                        {% else %}bg-blue-900/80 border-blue-700 text-blue-200{% endif %}">
+                        {{ message }}
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+    </div>
+
+    <main class="flex-1 container mx-auto px-4 py-6 max-w-7xl">
+        {% block content %}{% endblock %}
+    </main>
+
+    {% include "components/footer.html" %}
+
+    <script>
+        document.body.addEventListener("htmx:afterSwap", function(event) {
+            if (event.detail.target.id === "flash") {
+                const messages = event.detail.target.querySelectorAll(".flash-message");
+                messages.forEach(function(msg) {
+                    setTimeout(function() {
+                        msg.style.transition = "opacity 0.5s";
+                        msg.style.opacity = "0";
+                        setTimeout(function() { msg.remove(); }, 500);
+                    }, 4000);
+                });
+            }
+        });
+
+        document.addEventListener("DOMContentLoaded", function() {
+            const messages = document.querySelectorAll(".flash-message");
+            messages.forEach(function(msg) {
+                setTimeout(function() {
+                    msg.style.transition = "opacity 0.5s";
+                    msg.style.opacity = "0";
+                    setTimeout(function() { msg.remove(); }, 500);
+                }, 4000);
+            });
+        });
+    </script>
+</body>
+</html>

@@ -98,6 +98,7 @@ sudo apt install -y \
   software-properties-common \
   python3 \
   python3-pip \
+  python3-venv \
   pkg-config \
   libssl-dev \
   file \
@@ -508,6 +509,31 @@ sudo chmod +x /usr/local/bin/add-dev-user
 log "add-dev-user helper installed at /usr/local/bin/add-dev-user"
 
 # ---------------------------------------------------------------------------
+# 19. Web dashboard & bot services
+# ---------------------------------------------------------------------------
+info "Setting up web dashboard and bot services..."
+WEB_DIR="$HOME/.local/share/dev-cli/web"
+VENV_DIR="$HOME/.config/dev-cli/venv"
+
+if [ -d "$WEB_DIR" ] && [ -f "$WEB_DIR/requirements.txt" ]; then
+  if [ ! -d "$VENV_DIR" ]; then
+    info "Creating Python virtual environment..."
+    python3 -m venv "$VENV_DIR"
+  fi
+  info "Installing Python dependencies..."
+  "$VENV_DIR/bin/pip" install -q -r "$WEB_DIR/requirements.txt"
+  log "Python venv ready"
+
+  # Install systemd services (auto-start on boot)
+  info "Installing systemd services..."
+  "$BIN_DIR/dev" services install 2>/dev/null || \
+    "$HOME/.local/bin/dev" services install 2>/dev/null || \
+    warn "Could not install services automatically. Run 'dev services install' after login."
+else
+  warn "Web dashboard files not found — run install.sh first, then 'dev services install'"
+fi
+
+# ---------------------------------------------------------------------------
 # Done
 # ---------------------------------------------------------------------------
 echo ""
@@ -532,5 +558,9 @@ echo "     $ dev init"
 echo ""
 echo "  5. Spin up an agent:"
 echo "     $ dev new <project> feat/my-feature --agent claude"
+echo ""
+echo "  Web dashboard and Telegram bot services are installed"
+echo "  and will auto-start on boot. Check status with:"
+echo "     $ dev services status"
 echo ""
 echo "============================================"
