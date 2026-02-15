@@ -827,7 +827,7 @@ cmd_setup() {
 }
 
 cmd_new() {
-  local project="${2:-}" branch="${3:-}" agent="" agents_flag="" run_cmd=""
+  local project="${2:-}" branch="${3:-}" agent="" agents_flag="" run_cmd="" yolo=false
   shift 2 || true
 
   # Parse options
@@ -839,6 +839,7 @@ cmd_new() {
       --agents=*) agents_flag="${1#*=}"; shift ;;
       --run) run_cmd="${2:-}"; shift 2 ;;
       --run=*) run_cmd="${1#*=}"; shift ;;
+      --yolo) yolo=true; shift ;;
       *) shift ;;
     esac
   done
@@ -860,8 +861,15 @@ cmd_new() {
     fi
   fi
 
-  [ -z "$project" ] && die "Usage: dev new <project> <branch> [--agent claude|codex] [--agents claude,codex]"
-  [ -z "$branch" ] && die "Usage: dev new <project> <branch> [--agent claude|codex] [--agents claude,codex]"
+  # Resolve yolo: --yolo flag > project config
+  if [ "$yolo" != true ] && [ -n "$project" ] && [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
+    local config_yolo
+    config_yolo=$(jq -r '.skip_permissions // false' "$CONFIG_DIR/projects/${project}.json" 2>/dev/null)
+    [ "$config_yolo" = "true" ] && yolo=true
+  fi
+
+  [ -z "$project" ] && die "Usage: dev new <project> <branch> [--agent claude|codex|none] [--agents claude,codex] [--yolo]"
+  [ -z "$branch" ] && die "Usage: dev new <project> <branch> [--agent claude|codex|none] [--agents claude,codex] [--yolo]"
 
   local bare_dir="$PROJECTS_DIR/$project"
   local wt_dir="$PROJECTS_DIR/${project}-worktrees"
@@ -982,10 +990,13 @@ cmd_new() {
   primary_agent=$(echo "$agent" | cut -d',' -f1)
   info "Starting tmux session '$name' with $agent..."
 
+  local claude_flags=""
+  [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
+
   local agent_cmd
   case "$primary_agent" in
     claude)
-      agent_cmd="cd $worktree_path && claude"
+      agent_cmd="cd $worktree_path && claude${claude_flags}"
       ;;
     codex)
       agent_cmd="cd $worktree_path && codex"
@@ -1012,7 +1023,7 @@ cmd_new() {
     for extra_agent in "${agent_list[@]:1}"; do
       local extra_cmd
       case "$extra_agent" in
-        claude) extra_cmd="cd $worktree_path && claude" ;;
+        claude) extra_cmd="cd $worktree_path && claude${claude_flags}" ;;
         codex)  extra_cmd="cd $worktree_path && codex" ;;
         *)      warn "Unknown agent '$extra_agent', skipping"; continue ;;
       esac
@@ -2085,15 +2096,6 @@ cmd_restart() {
   local primary_agent
   primary_agent=$(echo "$agents" | cut -d',' -f1)
 
-  # Recreate tmux session with primary agent
-  local agent_cmd
-  case "$primary_agent" in
-    claude) agent_cmd="cd $worktree_path && claude" ;;
-    codex)  agent_cmd="cd $worktree_path && codex" ;;
-    none)   agent_cmd="cd $worktree_path && echo 'Ready. No agent started.' && bash" ;;
-    *)      agent_cmd="cd $worktree_path && bash" ;;
-  esac
-
   # Read port info from registry
   local slot frontend backend supa_api supa_db supa_studio
   slot=$(get_session_field "$match" "slot")
@@ -2103,13 +2105,28 @@ cmd_restart() {
   supa_db=$(get_session_field "$match" "ports.supa_db")
   supa_studio=$(get_session_field "$match" "ports.supa_studio")
 
-  # Resolve project name and run command
+  # Resolve project name, run command, and yolo mode
   local project
   project=$(get_session_field "$match" "project")
-  local run_cmd=""
+  local run_cmd="" yolo=false
   if [ -n "$project" ] && [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
     run_cmd=$(jq -r '.run_cmd // empty' "$CONFIG_DIR/projects/${project}.json")
+    local config_yolo
+    config_yolo=$(jq -r '.skip_permissions // false' "$CONFIG_DIR/projects/${project}.json")
+    [ "$config_yolo" = "true" ] && yolo=true
   fi
+
+  local claude_flags=""
+  [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
+
+  # Recreate tmux session with primary agent
+  local agent_cmd
+  case "$primary_agent" in
+    claude) agent_cmd="cd $worktree_path && claude${claude_flags}" ;;
+    codex)  agent_cmd="cd $worktree_path && codex" ;;
+    none)   agent_cmd="cd $worktree_path && echo 'Ready. No agent started.' && bash" ;;
+    *)      agent_cmd="cd $worktree_path && bash" ;;
+  esac
 
   local ip
   ip=$(get_ip)
@@ -2123,7 +2140,7 @@ cmd_restart() {
     for extra_agent in "${agent_list[@]:1}"; do
       local extra_cmd
       case "$extra_agent" in
-        claude) extra_cmd="cd $worktree_path && claude" ;;
+        claude) extra_cmd="cd $worktree_path && claude${claude_flags}" ;;
         codex)  extra_cmd="cd $worktree_path && codex" ;;
         *)      warn "Unknown agent '$extra_agent', skipping"; continue ;;
       esac
@@ -2355,11 +2372,12 @@ cmd_config() {
         echo -e "  ${BOLD}Configure project: $pname${NC}"
         echo ""
 
-        local cur_pkg="" cur_run="" cur_agent=""
+        local cur_pkg="" cur_run="" cur_agent="" cur_yolo=""
         if [ -f "$pconfig" ]; then
           cur_pkg=$(jq -r '.pkg_manager // empty' "$pconfig")
           cur_run=$(jq -r '.run_cmd // empty' "$pconfig")
           cur_agent=$(jq -r '.default_agent // empty' "$pconfig")
+          cur_yolo=$(jq -r '.skip_permissions // false' "$pconfig")
         fi
 
         echo -e "  Package manager:"
@@ -2398,6 +2416,15 @@ cmd_config() {
         esac
 
         echo ""
+        local default_yolo="n"
+        [ "${cur_yolo:-false}" = "true" ] && default_yolo="y"
+        read -rp "  Skip permissions / yolo mode (y/n) [$default_yolo]: " yolo_choice
+        local skip_perms=false
+        case "${yolo_choice:-$default_yolo}" in
+          y|Y|yes) skip_perms=true ;;
+        esac
+
+        echo ""
         read -rp "  Dev server command [${cur_run:-none}]: " new_run
         new_run="${new_run:-$cur_run}"
 
@@ -2414,7 +2441,8 @@ cmd_config() {
           --arg pkg "$pkg_mgr" \
           --arg agent "$def_agent" \
           --arg run "$new_run" \
-          '.pkg_manager = $pkg | .default_agent = $agent | (if $run != "" then .run_cmd = $run else del(.run_cmd) end)' > "$tmp"
+          --argjson yolo "$skip_perms" \
+          '.pkg_manager = $pkg | .default_agent = $agent | .skip_permissions = $yolo | (if $run != "" then .run_cmd = $run else del(.run_cmd) end)' > "$tmp"
 
         if [ -n "$win_input" ]; then
           local windows_json="["
@@ -2611,10 +2639,20 @@ cmd_agent() {
         env_prefix="source $SECRETS_FILE && "
       fi
 
+      # Resolve yolo from project config
+      local project yolo=false claude_flags=""
+      project=$(get_session_field "$match" "project")
+      if [ -n "$project" ] && [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
+        local config_yolo
+        config_yolo=$(jq -r '.skip_permissions // false' "$CONFIG_DIR/projects/${project}.json")
+        [ "$config_yolo" = "true" ] && yolo=true
+      fi
+      [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
+
       # Build agent command
       local agent_cmd
       case "$agent_type" in
-        claude) agent_cmd="cd $worktree_path && claude" ;;
+        claude) agent_cmd="cd $worktree_path && claude${claude_flags}" ;;
         codex)  agent_cmd="cd $worktree_path && codex" ;;
       esac
 
@@ -2741,9 +2779,10 @@ cmd_help() {
     dev help                                Show this help
 
   SESSIONS
-    dev new <project> <branch> [--agent claude|codex|none] [--agents claude,codex] [--run "<cmd>"]
+    dev new <project> <branch> [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--run "<cmd>"]
                                             Create worktree + start agent(s)
                                             --agents starts multiple agents (comma-separated)
+                                            --yolo launches Claude with --dangerously-skip-permissions
                                             --run auto-starts a command in the server window
     dev ls                                  List your active sessions
     dev ls --all                              List all users' sessions
@@ -2822,6 +2861,7 @@ cmd_help() {
     dev init                                 # interactive setup for new project
     dev setup klyra git@github.com:org/klyra.git
     dev new klyra feat/trading-ui --agent claude
+    dev new klyra feat/trading-ui --yolo
     dev new klyra fix/auth-bug --agents claude,codex
     dev agent add klyra-feat-trading-ui codex
     dev ls
