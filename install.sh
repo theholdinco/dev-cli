@@ -38,10 +38,12 @@ mkdir -p "$HOME/images"
 # Install binaries (atomic mv so a running 'dev' process isn't corrupted mid-read)
 cp "$REPO_DIR/bin/dev" "$BIN_DIR/dev.new"
 cp "$REPO_DIR/bin/dev-hub" "$BIN_DIR/dev-hub.new"
-chmod +x "$BIN_DIR/dev.new" "$BIN_DIR/dev-hub.new"
+cp "$REPO_DIR/bin/claude-tg-notify" "$BIN_DIR/claude-tg-notify.new"
+chmod +x "$BIN_DIR/dev.new" "$BIN_DIR/dev-hub.new" "$BIN_DIR/claude-tg-notify.new"
 mv "$BIN_DIR/dev.new" "$BIN_DIR/dev"
 mv "$BIN_DIR/dev-hub.new" "$BIN_DIR/dev-hub"
-log "Installed dev and dev-hub to $BIN_DIR/"
+mv "$BIN_DIR/claude-tg-notify.new" "$BIN_DIR/claude-tg-notify"
+log "Installed dev, dev-hub, and claude-tg-notify to $BIN_DIR/"
 
 # Install web dashboard files
 WEB_DIR="$HOME/.local/share/dev-cli/web"
@@ -155,7 +157,7 @@ _dev() {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
   # All available commands
-  commands="init setup new ls attach kill hub dashboard ports logs url supabase pr shell worktree img projects update help status restart send diff sync gc template config agent stats doctor web bot services mobile m"
+  commands="init setup new ls attach kill hub dashboard ports logs url supabase pr shell worktree img projects update help status restart send diff sync gc template config agent stats doctor web bot services notify mobile m"
 
   # Commands that take a session name as argument
   session_cmds="attach kill logs url shell pr status restart send diff sync"
@@ -221,6 +223,12 @@ _dev() {
   # services subcommands
   if [ "$cmd" = "services" ] && [ "$COMP_CWORD" -eq 2 ]; then
     COMPREPLY=( $(compgen -W "install uninstall start stop restart status logs" -- "$cur") )
+    return 0
+  fi
+
+  # notify subcommands
+  if [ "$cmd" = "notify" ] && [ "$COMP_CWORD" -eq 2 ]; then
+    COMPREPLY=( $(compgen -W "setup status test delay" -- "$cur") )
     return 0
   fi
 

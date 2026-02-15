@@ -60,7 +60,8 @@ DEFAULT_CONFIG='{
   },
   "telegram": {
     "bot_token": "",
-    "allowed_chat_ids": []
+    "allowed_chat_ids": [],
+    "notify_delay_seconds": 30
   },
   "web": {
     "port": 8080
@@ -3043,6 +3044,165 @@ cmd_bot() {
   esac
 }
 
+cmd_notify() {
+  local subcmd="${2:-help}"
+  case "$subcmd" in
+    setup)
+      local settings_file="$HOME/.claude/settings.json"
+      mkdir -p "$HOME/.claude"
+
+      local hooks_config
+      hooks_config=$(cat << 'HOOKS_JSON'
+{
+  "hooks": {
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claude-tg-notify notify"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claude-tg-notify notify"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claude-tg-notify cancel"
+          }
+        ]
+      }
+    ]
+  }
+}
+HOOKS_JSON
+      )
+
+      if [ -f "$settings_file" ]; then
+        # Merge hooks into existing settings
+        local merged
+        merged=$(jq -s '.[0] * .[1]' "$settings_file" <(echo "$hooks_config"))
+        echo "$merged" > "$settings_file"
+      else
+        echo "$hooks_config" > "$settings_file"
+      fi
+      log "Installed Claude Code hooks into $settings_file"
+
+      # Check if bot_token is configured
+      local token
+      token=$(get_config_value '.telegram.bot_token' '')
+      if [ -z "$token" ]; then
+        warn "No bot_token configured. Set it with:"
+        echo "  jq '.telegram.bot_token = \"YOUR_TOKEN\"' $GLOBAL_CONFIG > /tmp/cfg.json && mv /tmp/cfg.json $GLOBAL_CONFIG"
+      fi
+      local chat_ids
+      chat_ids=$(jq -r '.telegram.allowed_chat_ids | length' "$GLOBAL_CONFIG" 2>/dev/null || echo "0")
+      if [ "$chat_ids" = "0" ]; then
+        warn "No chat_ids configured. Set them with:"
+        echo "  jq '.telegram.allowed_chat_ids = [YOUR_CHAT_ID]' $GLOBAL_CONFIG > /tmp/cfg.json && mv /tmp/cfg.json $GLOBAL_CONFIG"
+      fi
+      ;;
+    status)
+      echo -e "${BOLD}Claude Code Notification Hooks${NC}"
+      echo ""
+
+      # Check hooks in settings.json
+      local settings_file="$HOME/.claude/settings.json"
+      if [ -f "$settings_file" ] && jq -e '.hooks.Notification' "$settings_file" > /dev/null 2>&1; then
+        echo -e "  Hooks:   ${GREEN}●${NC} installed in $settings_file"
+      else
+        echo -e "  Hooks:   ${RED}●${NC} not installed (run 'dev notify setup')"
+      fi
+
+      # Check bot token
+      local token
+      token=$(get_config_value '.telegram.bot_token' '')
+      if [ -n "$token" ]; then
+        echo -e "  Token:   ${GREEN}●${NC} configured (${token:0:10}...)"
+      else
+        echo -e "  Token:   ${RED}●${NC} not configured"
+      fi
+
+      # Check chat IDs
+      local chat_ids
+      chat_ids=$(jq -r '.telegram.allowed_chat_ids // [] | join(", ")' "$GLOBAL_CONFIG" 2>/dev/null || echo "")
+      if [ -n "$chat_ids" ]; then
+        echo -e "  Chat IDs: ${GREEN}●${NC} $chat_ids"
+      else
+        echo -e "  Chat IDs: ${RED}●${NC} none configured"
+      fi
+
+      # Show delay
+      local delay
+      delay=$(get_config_value '.telegram.notify_delay_seconds' '30')
+      echo -e "  Delay:   ${CYAN}${delay}s${NC}"
+      echo ""
+      ;;
+    test)
+      local token
+      token=$(get_config_value '.telegram.bot_token' '')
+      [ -n "$token" ] || die "No bot_token configured in $GLOBAL_CONFIG"
+
+      local chat_ids
+      chat_ids=$(jq -r '.telegram.allowed_chat_ids[]?' "$GLOBAL_CONFIG" 2>/dev/null || true)
+      [ -n "$chat_ids" ] || die "No chat_ids configured in $GLOBAL_CONFIG"
+
+      local hostname
+      hostname=$(hostname 2>/dev/null || echo "unknown")
+      local text="🔔 *dev-cli test*
+✅ Notifications working from \`${hostname}\`"
+
+      info "Sending test notification..."
+      while IFS= read -r chat_id; do
+        [ -n "$chat_id" ] || continue
+        local result
+        result=$(curl -s -X POST "https://api.telegram.org/bot${token}/sendMessage" \
+          -d chat_id="$chat_id" \
+          -d text="$text" \
+          -d parse_mode="Markdown" 2>&1)
+        if echo "$result" | jq -e '.ok' > /dev/null 2>&1; then
+          log "Sent to chat $chat_id"
+        else
+          local desc
+          desc=$(echo "$result" | jq -r '.description // "unknown error"' 2>/dev/null)
+          die "Failed to send to chat $chat_id: $desc"
+        fi
+      done <<< "$chat_ids"
+      ;;
+    delay)
+      local seconds="${3:-}"
+      [ -n "$seconds" ] || die "Usage: dev notify delay <seconds>"
+      # Validate it's a number
+      [[ "$seconds" =~ ^[0-9]+$ ]] || die "Delay must be a positive integer"
+
+      local tmp
+      tmp=$(mktemp)
+      jq --argjson delay "$seconds" '.telegram.notify_delay_seconds = $delay' "$GLOBAL_CONFIG" > "$tmp" && mv "$tmp" "$GLOBAL_CONFIG"
+      log "Notification delay set to ${seconds}s"
+      ;;
+    *)
+      echo "Usage: dev notify <setup|status|test|delay>"
+      echo ""
+      echo "  setup          Install Claude Code hooks for Telegram notifications"
+      echo "  status         Show current notification config and status"
+      echo "  test           Send a test notification"
+      echo "  delay <secs>   Set notification delay (default: 30s)"
+      ;;
+  esac
+}
+
 cmd_services() {
   local subcmd="${2:-help}"
   local service_dir="/etc/systemd/system"
@@ -3318,6 +3478,12 @@ cmd_help() {
     dev doctor                              System health check
     dev template <project>                  Edit project hook/template
 
+  NOTIFICATIONS
+    dev notify setup                        Install Claude Code hooks for Telegram alerts
+    dev notify status                       Show notification config and status
+    dev notify test                         Send a test Telegram notification
+    dev notify delay <seconds>              Set inactivity delay (default: 30s)
+
   WEB & BOT
     dev web setup                           Install Python deps for dashboard
     dev web start [port]                    Start web dashboard (default: 8080)
@@ -3407,6 +3573,7 @@ case "${1:-help}" in
   web)       cmd_web "$@" ;;
   bot)       cmd_bot "$@" ;;
   services)  cmd_services "$@" ;;
+  notify)    cmd_notify "$@" ;;
   mobile|m)  cmd_mobile ;;
   help|-h|--help) cmd_help ;;
   *)         die "Unknown command: $1. Run 'dev help' for usage." ;;

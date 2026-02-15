@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+###############################################################################
+# claude-tg-notify — Claude Code hook script for Telegram notifications
+#
+# Called by Claude Code hooks (Notification, Stop, UserPromptSubmit).
+# Sends a Telegram message after a configurable delay unless the user
+# responds first (cancelling the pending notification).
+#
+# Usage (called automatically by hooks):
+#   claude-tg-notify notify   # stdin: hook JSON (Notification/Stop)
+#   claude-tg-notify cancel   # stdin: hook JSON (UserPromptSubmit)
+###############################################################################
+
+set -euo pipefail
+
+CONFIG_DIR="$HOME/.config/dev-cli"
+GLOBAL_CONFIG="$CONFIG_DIR/config.json"
+PORT_REGISTRY="$CONFIG_DIR/ports.json"
+NOTIFY_DIR="/tmp/claude-tg-notify"
+
+mkdir -p "$NOTIFY_DIR"
+
+# ── Read config ─────────────────────────────────────────────────────────────
+
+get_config() {
+  local key="$1" default="${2:-}"
+  if [ -f "$GLOBAL_CONFIG" ]; then
+    local val
+    val=$(jq -r "$key // empty" "$GLOBAL_CONFIG" 2>/dev/null || true)
+    if [ -n "$val" ]; then
+      echo "$val"
+      return
+    fi
+  fi
+  echo "$default"
+}
+
+BOT_TOKEN=$(get_config '.telegram.bot_token' '')
+CHAT_IDS=$(jq -r '.telegram.allowed_chat_ids[]? // empty' "$GLOBAL_CONFIG" 2>/dev/null || true)
+DELAY=$(get_config '.telegram.notify_delay_seconds' '30')
+
+# Exit early if not configured
+[ -n "$BOT_TOKEN" ] || exit 0
+[ -n "$CHAT_IDS" ] || exit 0
+
+# ── Read hook input from stdin ──────────────────────────────────────────────
+
+INPUT=$(cat)
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
+[ -n "$SESSION_ID" ] || exit 0
+
+PENDING_FILE="$NOTIFY_DIR/$SESSION_ID.pending"
+SENT_FILE="$NOTIFY_DIR/$SESSION_ID.sent"
+MODE="${1:-notify}"
+
+# ── Derive session name from cwd ────────────────────────────────────────────
+
+get_session_name() {
+  local cwd
+  cwd=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
+  [ -n "$cwd" ] || { echo "unknown"; return; }
+
+  if [ -f "$PORT_REGISTRY" ]; then
+    local name
+    name=$(jq -r --arg cwd "$cwd" '
+      to_entries[] | select(.value.path == $cwd or (.value.path != null and ($cwd | startswith(.value.path))))
+      | .key' "$PORT_REGISTRY" 2>/dev/null | head -1)
+    if [ -n "$name" ]; then
+      echo "$name"
+      return
+    fi
+  fi
+
+  # Fallback: use last two path components
+  basename "$(dirname "$cwd")"/"$(basename "$cwd")" 2>/dev/null || echo "unknown"
+}
+
+# ── Cancel mode ─────────────────────────────────────────────────────────────
+
+if [ "$MODE" = "cancel" ]; then
+  rm -f "$PENDING_FILE"
+  # Delete all sent Telegram messages for this session
+  if [ -f "$SENT_FILE" ]; then
+    while IFS=: read -r chat_id msg_id; do
+      if [ -n "$chat_id" ] && [ -n "$msg_id" ]; then
+        curl -s --max-time 5 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage" \
+          -d chat_id="$chat_id" \
+          -d message_id="$msg_id" \
+          > /dev/null 2>&1 || true
+      fi
+    done < "$SENT_FILE"
+    rm -f "$SENT_FILE"
+  fi
+  exit 0
+fi
+
+# ── Notify mode ─────────────────────────────────────────────────────────────
+
+# Parse notification details
+HOOK_TYPE=$(echo "$INPUT" | jq -r '.hook_event_name // empty' 2>/dev/null || true)
+NOTIF_TYPE=$(echo "$INPUT" | jq -r '.notification_type // empty' 2>/dev/null || true)
+TITLE=$(echo "$INPUT" | jq -r '.title // empty' 2>/dev/null || true)
+MESSAGE=$(echo "$INPUT" | jq -r '.message // empty' 2>/dev/null || true)
+
+# Map notification type to emoji and description
+map_notification() {
+  case "$NOTIF_TYPE" in
+    permission_prompt)  echo "⚡ Needs permission" ;;
+    idle_prompt)        echo "💤 Idle — waiting for input" ;;
+    elicitation_dialog) echo "❓ Asking a question" ;;
+    *)
+      if [ "$HOOK_TYPE" = "Stop" ]; then
+        echo "✅ Finished responding"
+      else
+        echo "🔔 ${NOTIF_TYPE:-Notification}"
+      fi
+      ;;
+  esac
+}
+
+SESSION_NAME=$(get_session_name)
+NOTIF_LINE=$(map_notification)
+
+# Build message text
+TG_TEXT="🔔 *${SESSION_NAME}*
+${NOTIF_LINE}"
+[ -n "$TITLE" ] && TG_TEXT="${TG_TEXT}
+_${TITLE}_"
+if [ -n "$MESSAGE" ]; then
+  # Truncate long messages
+  local_msg="$MESSAGE"
+  if [ "${#local_msg}" -gt 200 ]; then
+    local_msg="${local_msg:0:200}..."
+  fi
+  TG_TEXT="${TG_TEXT}
+\`${local_msg}\`"
+fi
+
+# Write pending file with nonce
+NONCE=$(head -c 16 /dev/urandom | xxd -p 2>/dev/null || date +%s%N)
+echo "${NONCE}" > "$PENDING_FILE"
+
+# Spawn fully-detached background sender (close fds so Claude Code doesn't wait)
+(
+  sleep "$DELAY"
+
+  # Check if still pending with same nonce
+  if [ -f "$PENDING_FILE" ]; then
+    CURRENT_NONCE=$(cat "$PENDING_FILE" 2>/dev/null || true)
+    if [ "$CURRENT_NONCE" = "$NONCE" ]; then
+      # Send to all configured chat IDs, append message IDs for later deletion
+      while IFS= read -r chat_id; do
+        [ -n "$chat_id" ] || continue
+        local_result=$(curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+          -d chat_id="$chat_id" \
+          -d text="$TG_TEXT" \
+          -d parse_mode="Markdown" 2>/dev/null || true)
+        local_msg_id=$(echo "$local_result" | jq -r '.result.message_id // empty' 2>/dev/null || true)
+        [ -n "$local_msg_id" ] && echo "${chat_id}:${local_msg_id}" >> "$SENT_FILE"
+      done <<< "$CHAT_IDS"
+      rm -f "$PENDING_FILE"
+    fi
+  fi
+) </dev/null >/dev/null 2>&1 &
+disown
+
+exit 0
