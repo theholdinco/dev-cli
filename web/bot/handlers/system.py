@@ -14,7 +14,32 @@ from bot.formatters import (
     code_block,
 )
 from core.sessions import list_sessions, get_session, get_ip
+from core.system import get_stats
 from core.commands import run_doctor, run_gc
+
+
+@authorized
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /stats — show server resource usage."""
+    stats = get_stats()
+    mem = stats["memory"]
+    disk = stats["disk"]
+
+    header = f"\U0001f4ca {bold(escape_md(stats['hostname']))}"
+
+    body_lines = [
+        f"Host:      {stats['ip']}  |  {stats['cpu_count']} CPUs",
+        f"Uptime:    {stats['uptime']}",
+        f"Load:      {stats['load']}",
+        "",
+        f"Memory:    {mem['used']} / {mem['total']}  ({mem['available']} free)",
+        f"Disk:      {disk['used']} / {disk['total']}  ({disk['percent']})",
+        "",
+        f"Sessions:  {stats['sessions_alive']} alive / {stats['sessions_total']} total",
+    ]
+
+    text = header + "\n\n" + code_block("\n".join(body_lines))
+    await update.message.reply_text(truncate(text), parse_mode="MarkdownV2")
 
 
 @authorized

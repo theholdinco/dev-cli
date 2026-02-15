@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block title %}Stats - dev-cli{% endblock %}
+
+{% block content %}
+<h1 class="text-2xl font-bold text-white mb-6">Server Stats</h1>
+
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <div class="text-sm text-gray-400 mb-1">Hostname</div>
+        <div class="text-lg font-semibold text-white">{{ stats.hostname }}</div>
+        <div class="text-xs text-gray-500 mt-1">{{ stats.ip }}</div>
+    </div>
+
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <div class="text-sm text-gray-400 mb-1">Uptime</div>
+        <div class="text-lg font-semibold text-white">{{ stats.uptime }}</div>
+        <div class="text-xs text-gray-500 mt-1">{{ stats.cpu_count }} CPUs</div>
+    </div>
+
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <div class="text-sm text-gray-400 mb-1">Load Average</div>
+        <div class="text-lg font-semibold text-white font-mono">{{ stats.load }}</div>
+    </div>
+
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <div class="text-sm text-gray-400 mb-1">Sessions</div>
+        <div class="text-lg font-semibold text-white">{{ stats.sessions_alive }} <span class="text-gray-500 text-sm font-normal">alive</span></div>
+        <div class="text-xs text-gray-500 mt-1">{{ stats.sessions_total }} total</div>
+    </div>
+</div>
+
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <div class="text-sm text-gray-400 mb-3">Memory</div>
+        {% set mem = stats.memory %}
+        <div class="flex justify-between text-sm mb-2">
+            <span class="text-gray-300">{{ mem.used }} used</span>
+            <span class="text-gray-500">{{ mem.total }} total</span>
+        </div>
+        <div class="w-full bg-gray-700 rounded-full h-2">
+            {% if mem.used and mem.total %}
+            <div class="bg-blue-500 h-2 rounded-full" style="width: {{ ((mem.used | replace('Gi','') | replace('Mi','') | float) / (mem.total | replace('Gi','') | replace('Mi','') | float) * 100) | round | int }}%"></div>
+            {% endif %}
+        </div>
+        <div class="text-xs text-gray-500 mt-2">{{ mem.available }} available</div>
+    </div>
+
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <div class="text-sm text-gray-400 mb-3">Disk</div>
+        {% set disk = stats.disk %}
+        <div class="flex justify-between text-sm mb-2">
+            <span class="text-gray-300">{{ disk.used }} used</span>
+            <span class="text-gray-500">{{ disk.total }} total</span>
+        </div>
+        <div class="w-full bg-gray-700 rounded-full h-2">
+            {% if disk.percent %}
+            <div class="bg-blue-500 h-2 rounded-full" style="width: {{ disk.percent | replace('%','') }}%"></div>
+            {% endif %}
+        </div>
+        <div class="text-xs text-gray-500 mt-2">{{ disk.available }} available ({{ disk.percent }})</div>
+    </div>
+</div>
+{% endblock %}

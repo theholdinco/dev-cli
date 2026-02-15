@@ -155,7 +155,7 @@ _dev() {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
   # All available commands
-  commands="init setup new ls attach kill hub dashboard ports logs url supabase pr shell worktree img projects update help status restart send diff sync gc template config agent stats doctor web bot"
+  commands="init setup new ls attach kill hub dashboard ports logs url supabase pr shell worktree img projects update help status restart send diff sync gc template config agent stats doctor web bot services"
 
   # Commands that take a session name as argument
   session_cmds="attach kill logs url shell pr status restart send diff sync"
@@ -215,6 +215,12 @@ _dev() {
   # bot subcommands
   if [ "$cmd" = "bot" ] && [ "$COMP_CWORD" -eq 2 ]; then
     COMPREPLY=( $(compgen -W "setup start stop status" -- "$cur") )
+    return 0
+  fi
+
+  # services subcommands
+  if [ "$cmd" = "services" ] && [ "$COMP_CWORD" -eq 2 ]; then
+    COMPREPLY=( $(compgen -W "install uninstall start stop restart status logs" -- "$cur") )
     return 0
   fi
 

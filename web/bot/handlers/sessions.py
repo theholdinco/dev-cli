@@ -21,34 +21,35 @@ HELP_TEXT = """Available commands:
 *Session Management*
 /ls \\- List active sessions
 /ls all \\- List all sessions
-/status <session> \\- Session details
-/new <project> <branch> \\[agent\\] \\[\\-\\-yolo\\] \\- Create session
-/kill <session> \\- Kill session
-/restart <session> \\- Restart session
+/status \\<session\\> \\- Session details
+/new \\<project\\> \\<branch\\> \\[agent\\] \\[\\-\\-yolo\\] \\- Create session
+/kill \\<session\\> \\- Kill session
+/restart \\<session\\> \\- Restart session
 
 *Agent Management*
-/agent\\_add <session> <type> \\- Add agent
-/agent\\_remove <session> <type> \\- Remove agent
-/agent\\_list <session> \\- List agents
+/agent\\_add \\<session\\> \\<type\\> \\- Add agent
+/agent\\_remove \\<session\\> \\<type\\> \\- Remove agent
+/agent\\_list \\<session\\> \\- List agents
 
 *Commands*
-/send <session> <prompt> \\- Send prompt to agent
-/diff <session> \\- Show git diff
-/logs <session> \\[lines\\] \\- Show recent output
-/pr <session> \\[\\-\\-draft\\] \\- Create PR
-/sync <session> \\- Sync upstream
+/send \\<session\\> \\<prompt\\> \\- Send prompt to agent
+/diff \\<session\\> \\- Show git diff
+/logs \\<session\\> \\[lines\\] \\- Show recent output
+/pr \\<session\\> \\[\\-\\-draft\\] \\- Create PR
+/sync \\<session\\> \\- Sync upstream
 
 *System*
+/stats \\- Server resource usage
 /ports \\- Port allocation table
 /doctor \\- Run diagnostics
-/url <session> \\- Show access URLs
+/url \\<session\\> \\- Show access URLs
 /gc \\- Garbage collection"""
 
 
 @authorized
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start and /help commands."""
-    welcome = f"\U0001f680 {bold('dev\\-cli Telegram Bot')}\n\n{HELP_TEXT}"
+    welcome = f"\U0001f680 {bold('dev-cli Telegram Bot')}\n\n{HELP_TEXT}"
     await update.message.reply_text(welcome, parse_mode="MarkdownV2")
 
 

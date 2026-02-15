@@ -1,9 +1,19 @@
-from flask import Blueprint, render_template, request
+from flask import Blueprint, jsonify, render_template, request
 
-from core.system import get_port_table
+from core.system import get_port_table, get_stats
 from core.commands import run_doctor
 
 system_bp = Blueprint("system", __name__, url_prefix="/system")
+
+
+@system_bp.route("/stats")
+def stats_view():
+    stats = get_stats()
+
+    if request.headers.get("Accept") == "application/json":
+        return jsonify(stats)
+
+    return render_template("system/stats.html", stats=stats)
 
 
 @system_bp.route("/ports")

@@ -2793,6 +2793,9 @@ cmd_web() {
       log "Web dashboard setup complete"
       ;;
     start)
+      if systemctl is-active dev-web.service &>/dev/null; then
+        die "Web dashboard is managed by systemd. Use 'dev services stop' first, or 'dev services restart'"
+      fi
       local port="${3:-$(get_config_value '.web.port' '8080')}"
       local venv_dir="$CONFIG_DIR/venv"
       local pid_file="$CONFIG_DIR/web.pid"
@@ -2865,6 +2868,9 @@ cmd_bot() {
       cmd_web setup
       ;;
     start)
+      if systemctl is-active dev-bot.service &>/dev/null; then
+        die "Telegram bot is managed by systemd. Use 'dev services stop' first, or 'dev services restart'"
+      fi
       local venv_dir="$CONFIG_DIR/venv"
       local pid_file="$CONFIG_DIR/bot.pid"
       [ -d "$venv_dir" ] || die "Run 'dev bot setup' first"
@@ -2915,6 +2921,168 @@ cmd_bot() {
       ;;
     *)
       echo "Usage: dev bot <setup|start|stop|status>"
+      ;;
+  esac
+}
+
+cmd_services() {
+  local subcmd="${2:-help}"
+  local service_dir="/etc/systemd/system"
+  local venv_dir="$CONFIG_DIR/venv"
+  local run_user="$USER"
+  local run_home="$HOME"
+
+  _write_service_files() {
+    local web_port
+    web_port=$(get_config_value '.web.port' '8080')
+
+    sudo tee "$service_dir/dev-web.service" > /dev/null << EOF
+[Unit]
+Description=dev-cli Web Dashboard
+After=network.target
+
+[Service]
+Type=exec
+User=$run_user
+WorkingDirectory=$WEB_DIR
+Environment=PYTHONPATH=$WEB_DIR
+Environment=HOME=$run_home
+ExecStart=$venv_dir/bin/gunicorn --bind 0.0.0.0:$web_port --workers 2 --timeout 120 "dashboard.app:create_app()"
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    sudo tee "$service_dir/dev-bot.service" > /dev/null << EOF
+[Unit]
+Description=dev-cli Telegram Bot
+After=network.target
+
+[Service]
+Type=exec
+User=$run_user
+WorkingDirectory=$WEB_DIR
+Environment=PYTHONPATH=$WEB_DIR
+Environment=HOME=$run_home
+ExecStart=$venv_dir/bin/python -m bot.app
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  }
+
+  case "$subcmd" in
+    install)
+      [ -d "$venv_dir" ] || die "Python venv not found. Run 'dev web setup' first"
+      [ -d "$WEB_DIR" ] || die "Web dashboard not installed. Run install.sh first"
+      # Kill any existing dev web start / dev bot start processes
+      local web_pid="$CONFIG_DIR/web.pid"
+      if [ -f "$web_pid" ]; then
+        local pid
+        pid=$(cat "$web_pid")
+        if kill -0 "$pid" 2>/dev/null; then
+          kill "$pid" 2>/dev/null
+          info "Stopped old web dashboard process (PID $pid)"
+        fi
+        rm -f "$web_pid"
+      fi
+      local bot_pid="$CONFIG_DIR/bot.pid"
+      if [ -f "$bot_pid" ]; then
+        local pid
+        pid=$(cat "$bot_pid")
+        if kill -0 "$pid" 2>/dev/null; then
+          kill "$pid" 2>/dev/null
+          info "Stopped old Telegram bot process (PID $pid)"
+        fi
+        rm -f "$bot_pid"
+      fi
+      _write_service_files
+      sudo systemctl daemon-reload
+      sudo systemctl enable dev-web.service
+      log "dev-web service installed and enabled"
+      # Only enable bot if token is configured
+      local token
+      token=$(get_config_value '.telegram.bot_token' '')
+      if [ -n "$token" ]; then
+        sudo systemctl enable dev-bot.service
+        log "dev-bot service installed and enabled"
+      else
+        info "Telegram bot not enabled (no bot_token configured)"
+        info "Set telegram.bot_token in config, then run: dev services install"
+      fi
+      info "Services will auto-start on boot. Start now with: dev services start"
+      ;;
+    uninstall)
+      sudo systemctl stop dev-web.service 2>/dev/null || true
+      sudo systemctl stop dev-bot.service 2>/dev/null || true
+      sudo systemctl disable dev-web.service 2>/dev/null || true
+      sudo systemctl disable dev-bot.service 2>/dev/null || true
+      sudo rm -f "$service_dir/dev-web.service" "$service_dir/dev-bot.service"
+      sudo systemctl daemon-reload
+      log "Services uninstalled"
+      ;;
+    start)
+      sudo systemctl start dev-web.service
+      log "Web dashboard started"
+      local token
+      token=$(get_config_value '.telegram.bot_token' '')
+      if [ -n "$token" ]; then
+        sudo systemctl start dev-bot.service
+        log "Telegram bot started"
+      fi
+      ;;
+    stop)
+      sudo systemctl stop dev-web.service 2>/dev/null && log "Web dashboard stopped" || true
+      sudo systemctl stop dev-bot.service 2>/dev/null && log "Telegram bot stopped" || true
+      ;;
+    restart)
+      sudo systemctl restart dev-web.service
+      log "Web dashboard restarted"
+      local token
+      token=$(get_config_value '.telegram.bot_token' '')
+      if [ -n "$token" ]; then
+        sudo systemctl restart dev-bot.service
+        log "Telegram bot restarted"
+      fi
+      ;;
+    status)
+      echo -e "${BOLD}Services:${NC}"
+      echo ""
+      if systemctl is-active dev-web.service &>/dev/null; then
+        local web_port
+        web_port=$(get_config_value '.web.port' '8080')
+        local ip
+        ip=$(get_ip 2>/dev/null || echo "localhost")
+        echo -e "  ${GREEN}●${NC} Web dashboard  (http://${ip}:${web_port})"
+      else
+        echo -e "  ${RED}●${NC} Web dashboard"
+      fi
+      if systemctl is-active dev-bot.service &>/dev/null; then
+        echo -e "  ${GREEN}●${NC} Telegram bot"
+      else
+        echo -e "  ${RED}●${NC} Telegram bot"
+      fi
+      echo ""
+      if [ -f "$service_dir/dev-web.service" ]; then
+        echo -e "  Installed: ${GREEN}yes${NC} (auto-start on boot)"
+      else
+        echo -e "  Installed: ${RED}no${NC} (run 'dev services install')"
+      fi
+      ;;
+    logs)
+      local service="${3:-web}"
+      case "$service" in
+        web) journalctl -u dev-web.service -f --no-hostname ;;
+        bot) journalctl -u dev-bot.service -f --no-hostname ;;
+        *)   die "Unknown service: $service. Use 'web' or 'bot'" ;;
+      esac
+      ;;
+    *)
+      echo "Usage: dev services <install|uninstall|start|stop|restart|status|logs [web|bot]>"
       ;;
   esac
 }
@@ -3009,6 +3177,15 @@ cmd_help() {
     dev bot stop                            Stop Telegram bot
     dev bot status                          Show bot status
 
+  SERVICES (systemd — auto-start on boot)
+    dev services install                    Install and enable systemd services
+    dev services uninstall                  Remove systemd services
+    dev services start                      Start all services
+    dev services stop                       Stop all services
+    dev services restart                    Restart all services
+    dev services status                     Show service status
+    dev services logs [web|bot]             Follow service logs
+
   SETUP HOOKS (checked in priority order)
     1. <worktree>/.dev/setup.sh             In-repo hook (travels with the code)
     2. ~/.config/dev-cli/hooks/<project>/setup.sh
@@ -3078,6 +3255,7 @@ case "${1:-help}" in
   doctor)    cmd_doctor ;;
   web)       cmd_web "$@" ;;
   bot)       cmd_bot "$@" ;;
+  services)  cmd_services "$@" ;;
   help|-h|--help) cmd_help ;;
   *)         die "Unknown command: $1. Run 'dev help' for usage." ;;
 esac

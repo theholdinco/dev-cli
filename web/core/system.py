@@ -91,6 +91,51 @@ def get_port_table() -> list[dict]:
     return table
 
 
+def get_stats() -> dict:
+    """Return a dict with system stats: cpu, memory, disk, load, uptime, and session counts."""
+    info = get_system_info()
+    sessions = list_sessions(show_all=True)
+    alive = sum(1 for s in sessions if s.alive)
+    stats = {
+        "hostname": info["hostname"],
+        "ip": info["ip"],
+        "uptime": info["uptime"],
+        "load": info["load"],
+        "memory": info["memory"],
+        "disk": {"total": "", "used": "", "available": "", "percent": ""},
+        "cpu_count": 0,
+        "sessions_total": len(sessions),
+        "sessions_alive": alive,
+    }
+
+    # CPU count
+    try:
+        stats["cpu_count"] = os.cpu_count() or 0
+    except Exception:
+        pass
+
+    # Disk usage for /home (or /)
+    try:
+        result = subprocess.run(
+            ["df", "-h", "/home"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            lines = result.stdout.strip().splitlines()
+            if len(lines) >= 2:
+                parts = lines[1].split()
+                if len(parts) >= 5:
+                    stats["disk"]["total"] = parts[1]
+                    stats["disk"]["used"] = parts[2]
+                    stats["disk"]["available"] = parts[3]
+                    stats["disk"]["percent"] = parts[4]
+    except Exception:
+        pass
+
+    return stats
+
+
 def get_projects() -> list[str]:
     """List project names from ~/.config/dev-cli/projects/ (strip .json extension)."""
     if not os.path.isdir(PROJECTS_DIR):

@@ -1,9 +1,18 @@
 """Telegram bot initialization and entry point for dev-cli."""
 
 import json
+import logging
 import sys
+import traceback
 
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
 from core import GLOBAL_CONFIG
 from bot.handlers.sessions import (
@@ -17,7 +26,7 @@ from bot.handlers.sessions import (
 )
 from bot.handlers.agents import cmd_agent_add, cmd_agent_remove, cmd_agent_list
 from bot.handlers.commands import cmd_send, cmd_diff, cmd_logs, cmd_pr, cmd_sync
-from bot.handlers.system import cmd_ports, cmd_doctor, cmd_url, cmd_gc
+from bot.handlers.system import cmd_stats, cmd_ports, cmd_doctor, cmd_url, cmd_gc
 
 
 def get_bot_token() -> str:
@@ -66,6 +75,7 @@ def main():
     app.add_handler(CommandHandler("sync", cmd_sync))
 
     # System
+    app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("ports", cmd_ports))
     app.add_handler(CommandHandler("doctor", cmd_doctor))
     app.add_handler(CommandHandler("url", cmd_url))
@@ -74,7 +84,18 @@ def main():
     # Inline keyboard callbacks (kill confirmation)
     app.add_handler(CallbackQueryHandler(callback_kill, pattern=r"^kill_"))
 
-    print("Bot started. Polling for updates...")
+    # Error handler
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+        logger.error("Exception while handling an update:", exc_info=context.error)
+        if isinstance(update, Update) and update.message:
+            try:
+                await update.message.reply_text(f"Error: {context.error}")
+            except Exception:
+                pass
+
+    app.add_error_handler(error_handler)
+
+    logger.info("Bot started. Polling for updates...")
     app.run_polling()
 
 
