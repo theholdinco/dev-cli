@@ -68,6 +68,10 @@ DEFAULT_CONFIG='{
   }
 }'
 
+# ── Terminal Detection ─────────────────────────────────────────────────────
+term_width() { tput cols 2>/dev/null || echo 80; }
+is_compact() { [[ $(term_width) -lt 90 ]]; }
+
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 die() { echo -e "${RED}Error:${NC} $1" >&2; exit 1; }
@@ -1110,40 +1114,70 @@ cmd_ls() {
     echo -e "  ${DIM}$USER's sessions ($total_count/$MAX_SLOTS total slots used)${NC}"
   fi
   printf "\n"
-  printf "  ${BOLD}%-30s %-10s %-14s %-8s %-8s %-10s %-6s %-8s${NC}\n" \
-    "SESSION" "OWNER" "AGENT(S)" "FRONT" "BACK" "BRANCH" "AGE" "STATUS"
-  printf "  ${DIM}%-30s %-10s %-14s %-8s %-8s %-10s %-6s %-8s${NC}\n" \
-    "──────────────────────────────" "──────────" "──────────────" "────────" "────────" "──────────" "──────" "────────"
 
-  while IFS= read -r name; do
-    local agent branch frontend backend owner
-    agent=$(get_session_agents "$name")
-    branch=$(get_session_field "$name" "branch")
-    frontend=$(get_session_field "$name" "ports.frontend")
-    backend=$(get_session_field "$name" "ports.backend")
-    owner=$(get_session_field "$name" "owner")
-    owner="${owner:-unknown}"
+  if is_compact; then
+    # Compact card layout for narrow terminals
+    while IFS= read -r name; do
+      local agent branch frontend owner
+      agent=$(get_session_agents "$name")
+      branch=$(get_session_field "$name" "branch")
+      frontend=$(get_session_field "$name" "ports.frontend")
+      owner=$(get_session_field "$name" "owner")
 
-    local created age
-    created=$(get_session_field "$name" "created")
-    age=$(human_readable_age "$created")
+      local created age
+      created=$(get_session_field "$name" "created")
+      age=$(human_readable_age "$created")
 
-    # Check if tmux session is alive
-    local status
-    if tmux has-session -t "$name" 2>/dev/null; then
-      status="${GREEN}running${NC}"
-    else
-      status="${RED}dead${NC}"
-    fi
+      local status_icon
+      if tmux has-session -t "$name" 2>/dev/null; then
+        status_icon="${GREEN}●${NC}"
+        local status_word="running"
+      else
+        status_icon="${RED}●${NC}"
+        local status_word="dead"
+      fi
 
-    # Truncate branch if too long
-    local branch_display
-    branch_display=$(echo "$branch" | cut -c1-10)
+      local branch_display
+      branch_display=$(echo "$branch" | cut -c1-20)
 
-    printf "  %-30s %-10s %-14s %-8s %-8s %-10s %-6s " \
-      "$name" "$owner" "$agent" ":$frontend" ":$backend" "$branch_display" "$age"
-    echo -e "$status"
-  done <<< "$sessions"
+      echo -e "  $status_icon ${BOLD}$name${NC} ${DIM}($status_word)${NC}"
+      echo -e "    ${DIM}$agent · :$frontend · $age · $branch_display${NC}"
+    done <<< "$sessions"
+  else
+    # Full table for wide terminals
+    printf "  ${BOLD}%-30s %-10s %-14s %-8s %-8s %-10s %-6s %-8s${NC}\n" \
+      "SESSION" "OWNER" "AGENT(S)" "FRONT" "BACK" "BRANCH" "AGE" "STATUS"
+    printf "  ${DIM}%-30s %-10s %-14s %-8s %-8s %-10s %-6s %-8s${NC}\n" \
+      "──────────────────────────────" "──────────" "──────────────" "────────" "────────" "──────────" "──────" "────────"
+
+    while IFS= read -r name; do
+      local agent branch frontend backend owner
+      agent=$(get_session_agents "$name")
+      branch=$(get_session_field "$name" "branch")
+      frontend=$(get_session_field "$name" "ports.frontend")
+      backend=$(get_session_field "$name" "ports.backend")
+      owner=$(get_session_field "$name" "owner")
+      owner="${owner:-unknown}"
+
+      local created age
+      created=$(get_session_field "$name" "created")
+      age=$(human_readable_age "$created")
+
+      local status
+      if tmux has-session -t "$name" 2>/dev/null; then
+        status="${GREEN}running${NC}"
+      else
+        status="${RED}dead${NC}"
+      fi
+
+      local branch_display
+      branch_display=$(echo "$branch" | cut -c1-10)
+
+      printf "  %-30s %-10s %-14s %-8s %-8s %-10s %-6s " \
+        "$name" "$owner" "$agent" ":$frontend" ":$backend" "$branch_display" "$age"
+      echo -e "$status"
+    done <<< "$sessions"
+  fi
 
   printf "\n"
   echo -e "  ${DIM}Frontend URLs:  http://$ip:<port>${NC}"
@@ -1408,17 +1442,33 @@ cmd_ports() {
   echo ""
   echo -e "  ${BOLD}Port Allocation${NC} (IP: $ip)"
   echo ""
-  printf "  ${BOLD}%-5s %-30s %-10s %-10s %-10s %-10s %-10s${NC}\n" \
-    "SLOT" "SESSION" "FRONTEND" "BACKEND" "SUPA API" "SUPA DB" "SUPA UI"
-  printf "  ${DIM}%-5s %-30s %-10s %-10s %-10s %-10s %-10s${NC}\n" \
-    "─────" "──────────────────────────────" "──────────" "──────────" "──────────" "──────────" "──────────"
 
   local active_slots
   active_slots=$(jq -r 'to_entries | sort_by(.value.slot) | .[] | "\(.value.slot)\t\(.key)"' "$PORT_REGISTRY" 2>/dev/null)
 
   if [ -z "$active_slots" ]; then
     echo -e "  ${DIM}No active sessions. All $MAX_SLOTS slots available.${NC}"
+  elif is_compact; then
+    # Compact: slot, session, frontend, backend only
+    printf "  ${BOLD}%-4s %-20s %-8s %-8s${NC}\n" \
+      "SLOT" "SESSION" "FRONT" "BACK"
+    printf "  ${DIM}%-4s %-20s %-8s %-8s${NC}\n" \
+      "────" "────────────────────" "────────" "────────"
+    while IFS=$'\t' read -r slot session_name; do
+      local ports
+      ports=$(slot_ports "$slot")
+      read -r frontend backend _supa_api _supa_db _supa_studio <<< "$ports"
+      local short_name
+      short_name=$(echo "$session_name" | cut -c1-20)
+      printf "  ${GREEN}%-4s${NC} %-20s %-8s %-8s\n" \
+        "$slot" "$short_name" ":$frontend" ":$backend"
+    done <<< "$active_slots"
   else
+    # Full table
+    printf "  ${BOLD}%-5s %-30s %-10s %-10s %-10s %-10s %-10s${NC}\n" \
+      "SLOT" "SESSION" "FRONTEND" "BACKEND" "SUPA API" "SUPA DB" "SUPA UI"
+    printf "  ${DIM}%-5s %-30s %-10s %-10s %-10s %-10s %-10s${NC}\n" \
+      "─────" "──────────────────────────────" "──────────" "──────────" "──────────" "──────────" "──────────"
     while IFS=$'\t' read -r slot session_name; do
       local ports
       ports=$(slot_ports "$slot")
@@ -1924,16 +1974,84 @@ cmd_gc() {
 }
 
 cmd_stats() {
-  # Show quick session summary then launch btop
   local session_count=0
   if [[ -f "$PORT_REGISTRY" ]]; then
     session_count=$(jq 'length' "$PORT_REGISTRY" 2>/dev/null || echo 0)
   fi
-  echo ""
-  echo -e "  ${BOLD}dev stats${NC} — VPS Resource Monitor"
-  echo -e "  ${CYAN}Active sessions:${NC} $session_count  ${DIM}|${NC}  ${CYAN}Load:${NC} $(uptime | awk -F'load average: ' '{print $2}')"
-  echo ""
-  exec btop
+
+  if is_compact; then
+    # Text-based stats for narrow terminals
+    echo ""
+    echo -e "  ${BOLD}dev stats${NC} — VPS Overview"
+    echo ""
+
+    # CPU usage from /proc/stat
+    local cpu_line idle total cpu_pct
+    cpu_line=$(head -1 /proc/stat 2>/dev/null)
+    if [ -n "$cpu_line" ]; then
+      total=0
+      idle=0
+      local i=0
+      for val in $(echo "$cpu_line" | awk '{for(i=2;i<=NF;i++) print $i}'); do
+        total=$((total + val))
+        [ "$i" -eq 3 ] && idle=$val
+        i=$((i + 1))
+      done
+      if [ "$total" -gt 0 ]; then
+        cpu_pct=$(( (total - idle) * 100 / total ))
+      else
+        cpu_pct=0
+      fi
+    else
+      cpu_pct="?"
+    fi
+
+    # Memory from free
+    local mem_info mem_used mem_total mem_pct
+    mem_info=$(free -m 2>/dev/null | awk '/^Mem:/ {print $3, $2}')
+    if [ -n "$mem_info" ]; then
+      read -r mem_used mem_total <<< "$mem_info"
+      mem_pct=$(( mem_used * 100 / mem_total ))
+      # Format as G if >= 1024
+      if [ "$mem_used" -ge 1024 ]; then
+        mem_used="$(awk "BEGIN{printf \"%.1f\", $mem_used/1024}")G"
+      else
+        mem_used="${mem_used}M"
+      fi
+      if [ "$mem_total" -ge 1024 ]; then
+        mem_total="$(awk "BEGIN{printf \"%.1f\", $mem_total/1024}")G"
+      else
+        mem_total="${mem_total}M"
+      fi
+    else
+      mem_used="?" mem_total="?" mem_pct="?"
+    fi
+
+    # Disk usage
+    local disk_pct
+    disk_pct=$(df / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
+    disk_pct="${disk_pct:-?}"
+
+    # Load averages
+    local load_avg
+    load_avg=$(uptime | awk -F'load average: ' '{print $2}')
+
+    # Uptime
+    local up
+    up=$(uptime -p 2>/dev/null | sed 's/^up //' || uptime | awk -F'up ' '{print $2}' | awk -F',' '{print $1}')
+
+    echo -e "  ${CYAN}CPU:${NC} ${cpu_pct}%  ${CYAN}MEM:${NC} ${mem_used}/${mem_total} (${mem_pct}%)  ${CYAN}DISK:${NC} ${disk_pct}%"
+    echo -e "  ${CYAN}Load:${NC} $load_avg"
+    echo -e "  ${CYAN}Sessions:${NC} $session_count/$MAX_SLOTS  ${CYAN}Uptime:${NC} $up"
+    echo ""
+  else
+    # Wide terminal: launch btop
+    echo ""
+    echo -e "  ${BOLD}dev stats${NC} — VPS Resource Monitor"
+    echo -e "  ${CYAN}Active sessions:${NC} $session_count  ${DIM}|${NC}  ${CYAN}Load:${NC} $(uptime | awk -F'load average: ' '{print $2}')"
+    echo ""
+    exec btop
+  fi
 }
 
 cmd_doctor() {
@@ -3247,6 +3365,38 @@ EOF
   esac
 }
 
+cmd_mobile() {
+  echo ""
+  echo -e "  ${BOLD}${CYAN}DEV MOBILE${NC}"
+  echo ""
+  echo -e "  ${BOLD}1)${NC} ls        — List sessions"
+  echo -e "  ${BOLD}2)${NC} attach    — Attach to session"
+  echo -e "  ${BOLD}3)${NC} new       — Create session"
+  echo -e "  ${BOLD}4)${NC} logs      — View logs"
+  echo -e "  ${BOLD}5)${NC} stats     — System stats"
+  echo -e "  ${BOLD}6)${NC} hub       — Open hub"
+  echo ""
+  read -rp "  Choice [1-6]: " choice
+  echo ""
+
+  case "$choice" in
+    1) cmd_ls ls ;;
+    2) cmd_attach attach ;;
+    3)
+      read -rp "  Project: " project
+      read -rp "  Branch: " branch
+      [ -n "$project" ] && [ -n "$branch" ] && dev new "$project" "$branch"
+      ;;
+    4)
+      read -rp "  Session: " session
+      [ -n "$session" ] && cmd_logs logs "$session"
+      ;;
+    5) cmd_stats ;;
+    6) cmd_hub ;;
+    *) echo -e "  ${DIM}Invalid choice.${NC}" ;;
+  esac
+}
+
 cmd_help() {
   cat << 'HELPEOF'
 
@@ -3324,6 +3474,7 @@ cmd_help() {
   MAINTENANCE
     dev gc                                  Clean up dead sessions
     dev stats                               Launch resource monitor (btop)
+    dev mobile                              Mobile-friendly quick menu (alias: dev m)
     dev doctor                              System health check
     dev template <project>                  Edit project hook/template
 
@@ -3423,6 +3574,7 @@ case "${1:-help}" in
   bot)       cmd_bot "$@" ;;
   services)  cmd_services "$@" ;;
   notify)    cmd_notify "$@" ;;
+  mobile|m)  cmd_mobile ;;
   help|-h|--help) cmd_help ;;
   *)         die "Unknown command: $1. Run 'dev help' for usage." ;;
 esac

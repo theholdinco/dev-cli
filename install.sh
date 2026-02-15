@@ -157,7 +157,7 @@ _dev() {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
   # All available commands
-  commands="init setup new ls attach kill hub dashboard ports logs url supabase pr shell worktree img projects update help status restart send diff sync gc template config agent stats doctor web bot services notify"
+  commands="init setup new ls attach kill hub dashboard ports logs url supabase pr shell worktree img projects update help status restart send diff sync gc template config agent stats doctor web bot services notify mobile m"
 
   # Commands that take a session name as argument
   session_cmds="attach kill logs url shell pr status restart send diff sync"
