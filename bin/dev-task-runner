@@ -136,7 +136,14 @@ $description
 
 1. Make sure all changes are committed
 2. Run any relevant tests to verify your changes work
-3. Create a file called \`.task-done\` in the project root: \`touch .task-done\`
+3. Push your branch and create a PR:
+   - Write a clear, concise PR title that describes what you actually changed (do NOT just use the task description verbatim)
+   - Write a PR body with a summary of what was done and why
+   - Use: \`gh pr create --title "Your title" --body "Your description" --head $branch\`
+   - Save the PR URL to a file: \`echo "https://github.com/..." > .task-pr-url\`
+4. After the PR is created, create the done marker: \`touch .task-done\`
+
+**Important:** The PR title should be a proper, descriptive title (e.g. "Add retry logic to API client" or "Fix race condition in session cleanup"), NOT a copy of the task prompt. The PR body should summarize the changes made.
 
 This signals the task runner that you've completed the work.
 TASKEOF
@@ -181,51 +188,107 @@ check_running() {
 complete_task() {
   local id="$1" session="$2" worktree="$3"
 
-  # Commit any uncommitted changes
   cd "$worktree"
-  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-    git add -A
-    git commit -m "Task completed: $(task_field "$id" "description")" --no-verify 2>&1 | tail -3 >> "$LOG_FILE" || true
+
+  # Read PR URL from marker file (created by the AI agent)
+  local pr_url=""
+  if [ -f "$worktree/.task-pr-url" ]; then
+    pr_url=$(grep -oP 'https://\S+' "$worktree/.task-pr-url" | head -1)
   fi
 
-  # Remove the marker file and TASK.md from tracking
-  rm -f "$worktree/.task-done" "$worktree/TASK.md"
+  if [ -n "$pr_url" ]; then
+    update_task "$id" "pr_url" "$pr_url"
+    update_task "$id" "status" "pr-created"
+    log "PR found: $pr_url"
+  else
+    # Fallback: AI didn't create a PR, create one ourselves
+    log "WARNING: No .task-pr-url found — creating PR as fallback"
+
+    # Commit any uncommitted changes
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+      git add -A
+      git commit -m "Task completed: $(task_field "$id" "description")" --no-verify 2>&1 | tail -3 >> "$LOG_FILE" || true
+    fi
+
+    # Push branch
+    local branch
+    branch=$(task_field "$id" "branch")
+    git push -u origin "$branch" 2>&1 | tail -5 >> "$LOG_FILE" || true
+    log "Pushed branch $branch"
+
+    # Create PR with task description as fallback
+    local description
+    description=$(task_field "$id" "description")
+    local pr_output
+    pr_output=$(gh pr create \
+      --title "$description" \
+      --body "Automated task completed by dev-task-runner." \
+      --head "$branch" 2>&1) || true
+
+    if echo "$pr_output" | grep -q "https://"; then
+      pr_url=$(echo "$pr_output" | grep -oP 'https://\S+' | head -1)
+      update_task "$id" "pr_url" "$pr_url"
+      update_task "$id" "status" "pr-created"
+      log "Fallback PR created: $pr_url"
+    else
+      log "WARNING: PR creation may have failed: $pr_output"
+    fi
+  fi
+
+  # Clean up task marker files
+  rm -f "$worktree/.task-done" "$worktree/TASK.md" "$worktree/.task-pr-url"
   if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
     git add -A
     git commit -m "Clean up task files" --no-verify 2>&1 >> "$LOG_FILE" || true
+    local branch
+    branch=$(task_field "$id" "branch")
+    git push origin "$branch" 2>&1 >> "$LOG_FILE" || true
   fi
 
-  # Push branch
-  local branch
-  branch=$(task_field "$id" "branch")
-  git push -u origin "$branch" 2>&1 | tail -5 >> "$LOG_FILE" || true
-  log "Pushed branch $branch"
+  log "Task $id is now pr-created — waiting for PR to be merged"
+}
 
-  # Create PR
-  local description pr_url
-  description=$(task_field "$id" "description")
-  pr_url=$(gh pr create \
-    --title "$description" \
-    --body "Automated task completed by dev-task-runner." \
-    --head "$branch" 2>&1) || true
+# ── Check pr-created tasks for merged PRs ────────────────────────────────────
 
-  if echo "$pr_url" | grep -q "https://"; then
-    pr_url=$(echo "$pr_url" | grep -oP 'https://\S+' | head -1)
-    update_task "$id" "pr_url" "$pr_url"
-    log "PR created: $pr_url"
-  else
-    log "WARNING: PR creation may have failed: $pr_url"
-  fi
+check_merged() {
+  [ -f "$TASK_REGISTRY" ] || return 0
 
-  # Mark done
-  local now
-  now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-  local tmp="$TASK_REGISTRY.tmp.$$"
-  jq --arg id "$id" --arg now "$now" \
-    '(.tasks[] | select(.id == $id)) |= (.status = "done" | .completed = $now)' \
-    "$TASK_REGISTRY" > "$tmp" && mv "$tmp" "$TASK_REGISTRY"
+  local pr_tasks
+  pr_tasks=$(jq -r '.tasks[] | select(.status == "pr-created") | .id' "$TASK_REGISTRY")
+  [ -n "$pr_tasks" ] || return 0
 
-  log "Task $id marked as done"
+  while IFS= read -r id; do
+    local pr_url session
+    pr_url=$(task_field "$id" "pr_url")
+    [ -n "$pr_url" ] && [ "$pr_url" != "null" ] || continue
+
+    # Check PR merge status via gh
+    local pr_state
+    pr_state=$(gh pr view "$pr_url" --json state --jq '.state' 2>/dev/null) || continue
+
+    if [ "$pr_state" = "MERGED" ]; then
+      log "Task $id PR merged: $pr_url"
+
+      # Kill the session if still running
+      session=$(task_field "$id" "session")
+      if [ -n "$session" ] && [ "$session" != "null" ] && tmux has-session -t "$session" 2>/dev/null; then
+        log "Killing session $session for completed task $id"
+        dev kill "$session" 2>&1 | tail -3 >> "$LOG_FILE" || true
+      fi
+
+      local now
+      now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+      local tmp="$TASK_REGISTRY.tmp.$$"
+      jq --arg id "$id" --arg now "$now" \
+        '(.tasks[] | select(.id == $id)) |= (.status = "done" | .completed = $now)' \
+        "$TASK_REGISTRY" > "$tmp" && mv "$tmp" "$TASK_REGISTRY"
+
+      log "Task $id marked as done"
+    elif [ "$pr_state" = "CLOSED" ]; then
+      log "Task $id PR was closed without merging: $pr_url"
+      update_task "$id" "status" "failed"
+    fi
+  done <<< "$pr_tasks"
 }
 
 # ── Single pass ──────────────────────────────────────────────────────────────
@@ -233,6 +296,7 @@ complete_task() {
 run_once() {
   process_pending
   check_running
+  check_merged
 }
 
 # ── Main ─────────────────────────────────────────────────────────────────────

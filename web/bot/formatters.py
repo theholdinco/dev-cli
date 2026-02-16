@@ -152,10 +152,11 @@ def truncate(text: str, max_length: int = TELEGRAM_MAX_LENGTH) -> str:
 def _task_status_emoji(status: str) -> str:
     """Return a status emoji for a task."""
     return {
-        "pending": "\U0001f7e1",   # yellow circle
-        "running": "\U0001f535",   # blue circle
-        "done": "\U0001f7e2",     # green circle
-        "failed": "\U0001f534",   # red circle
+        "pending": "\U0001f7e1",      # yellow circle
+        "running": "\U0001f535",      # blue circle
+        "pr-created": "\U0001f7e3",   # purple circle
+        "done": "\U0001f7e2",        # green circle
+        "failed": "\U0001f534",      # red circle
     }.get(status, "\u26aa")       # white circle
 
 

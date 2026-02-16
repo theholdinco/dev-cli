@@ -125,6 +125,7 @@ def task_status_color(status: str) -> str:
     return {
         "pending": "yellow",
         "running": "blue",
+        "pr-created": "cyan",
         "done": "green",
         "failed": "red",
     }.get(status, "gray")
