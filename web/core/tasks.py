@@ -100,9 +100,19 @@ def add_task(project: str, branch: str, description: str) -> TaskInfo:
 
 
 def remove_task(task_id: str) -> bool:
-    """Remove a task by ID. Returns True if found and removed."""
+    """Remove a task by ID. Kills the session if running. Returns True if found and removed."""
     data = _read_registry()
     original_len = len(data.get("tasks", []))
+
+    # Find the task and kill its session if it has one
+    for t in data.get("tasks", []):
+        if str(t.get("id", "")) == task_id and t.get("session"):
+            subprocess.run(
+                ["dev", "kill", t["session"]],
+                capture_output=True, timeout=30,
+            )
+            break
+
     data["tasks"] = [t for t in data.get("tasks", []) if str(t.get("id", "")) != task_id]
     if len(data["tasks"]) < original_len:
         _write_registry(data)

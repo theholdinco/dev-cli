@@ -74,16 +74,21 @@ process_pending() {
     "$TASK_REGISTRY" > "$tmp" && mv "$tmp" "$TASK_REGISTRY"
 
   # Create session via dev new
-  local session_name
-  if ! session_name=$(dev new "$project" "$branch" --agent claude --yolo 2>&1 | grep -oP '(?<=Session: )\S+' | head -1); then
-    log "ERROR: Failed to create session for task $id"
-    update_task "$id" "status" "failed"
-    return 1
-  fi
+  local dev_output session_name
+  dev_output=$(dev new "$project" "$branch" --agent claude --yolo 2>&1) || true
+  # Strip ANSI codes before parsing
+  session_name=$(echo "$dev_output" | sed 's/\x1b\[[0-9;]*m//g' | grep -oP 'Session:\s+\K\S+' | head -1)
 
   # Fallback: derive session name from project-branch convention
   if [ -z "$session_name" ]; then
     session_name="${project}-$(echo "$branch" | tr '/' '-')"
+  fi
+
+  # Check the session actually exists
+  if ! tmux has-session -t "$session_name" 2>/dev/null; then
+    log "ERROR: Failed to create session for task $id. Output: $(echo "$dev_output" | tail -3)"
+    update_task "$id" "status" "failed"
+    return 1
   fi
 
   log "Session created: $session_name"

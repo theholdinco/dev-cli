@@ -3567,6 +3567,15 @@ cmd_task() {
     rm|remove)
       local id="${3:-}"
       [ -n "$id" ] || die "Usage: dev task rm <id>"
+
+      # If the task has a session, kill it first
+      local session
+      session=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .session // empty' "$TASK_REGISTRY")
+      if [ -n "$session" ] && jq -e --arg s "$session" '.[$s]' "$PORT_REGISTRY" &>/dev/null; then
+        info "Killing session '$session' for task #$id..."
+        cmd_kill "kill" "$session" || true
+      fi
+
       local tmp="$TASK_REGISTRY.tmp.$$"
       jq --arg id "$id" '.tasks = [.tasks[] | select(.id != $id)]' "$TASK_REGISTRY" > "$tmp" \
         && mv "$tmp" "$TASK_REGISTRY"
