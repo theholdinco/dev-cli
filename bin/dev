@@ -81,12 +81,17 @@ log() { echo -e "${GREEN}✓${NC} $1"; }
 info() { echo -e "${BLUE}→${NC} $1"; }
 warn() { echo -e "${YELLOW}!${NC} $1"; }
 
+fix_registry_perms() {
+  [[ "$PORT_REGISTRY" == "$GLOBAL_PORT_REGISTRY" ]] && chmod 664 "$PORT_REGISTRY" 2>/dev/null
+}
+
 ensure_dirs() {
   mkdir -p "$CONFIG_DIR" "$LOG_DIR" "$CONFIG_DIR/projects"
   # Use global port registry if writable, otherwise fall back to local
   if [ -d "/etc/dev-cli" ] && [ -w "/etc/dev-cli" ]; then
     PORT_REGISTRY="$GLOBAL_PORT_REGISTRY"
     [ -f "$PORT_REGISTRY" ] || echo '{}' > "$PORT_REGISTRY"
+    fix_registry_perms
   elif [ -f "$GLOBAL_PORT_REGISTRY" ] && [ -w "$GLOBAL_PORT_REGISTRY" ]; then
     PORT_REGISTRY="$GLOBAL_PORT_REGISTRY"
   else
@@ -293,6 +298,7 @@ register_session() {
           created: $created
         }' "$PORT_REGISTRY" > "$tmp"
     mv "$tmp" "$PORT_REGISTRY"
+    fix_registry_perms
   ) 200>"${PORT_REGISTRY}.lock"
 }
 
@@ -305,6 +311,7 @@ unregister_session() {
     tmp=$(mktemp)
     jq "del(.[\"$name\"])" "$PORT_REGISTRY" > "$tmp"
     mv "$tmp" "$PORT_REGISTRY"
+    fix_registry_perms
   ) 200>"${PORT_REGISTRY}.lock"
 }
 
@@ -2895,6 +2902,7 @@ cmd_agent() {
          .[$name].agents = ($current + [$agent_type] | unique)' \
         "$PORT_REGISTRY" > "$tmp"
       mv "$tmp" "$PORT_REGISTRY"
+      fix_registry_perms
 
       log "Added $agent_type agent to session '$match'"
       ;;
@@ -2927,6 +2935,7 @@ cmd_agent() {
          .[$name].agents = ($current | map(select(. != $agent_type)))' \
         "$PORT_REGISTRY" > "$tmp"
       mv "$tmp" "$PORT_REGISTRY"
+      fix_registry_perms
 
       log "Removed $agent_type agent from session '$match'"
       ;;
