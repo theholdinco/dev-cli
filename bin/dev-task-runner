@@ -198,6 +198,7 @@ complete_task() {
 
   if [ -n "$pr_url" ]; then
     update_task "$id" "pr_url" "$pr_url"
+    update_task "$id" "status" "pr-created"
     log "PR found: $pr_url"
   else
     # Fallback: AI didn't create a PR, create one ourselves
@@ -227,6 +228,7 @@ complete_task() {
     if echo "$pr_output" | grep -q "https://"; then
       pr_url=$(echo "$pr_output" | grep -oP 'https://\S+' | head -1)
       update_task "$id" "pr_url" "$pr_url"
+      update_task "$id" "status" "pr-created"
       log "Fallback PR created: $pr_url"
     else
       log "WARNING: PR creation may have failed: $pr_output"

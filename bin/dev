@@ -3583,18 +3583,19 @@ cmd_task() {
         return
       fi
       echo ""
-      printf "  ${BOLD}%-4s %-10s %-20s %-25s %s${NC}\n" "ID" "STATUS" "PROJECT" "BRANCH" "DESCRIPTION"
-      echo "  ─────────────────────────────────────────────────────────────────────────────"
+      printf "  ${BOLD}%-4s %-12s %-20s %-25s %s${NC}\n" "ID" "STATUS" "PROJECT" "BRANCH" "DESCRIPTION"
+      echo "  ─────────────────────────────────────────────────────────────────────────────────"
       jq -r '.tasks[] | [.id, .status, .project, .branch, .description] | @tsv' "$TASK_REGISTRY" | \
       while IFS=$'\t' read -r id status project branch desc; do
         local color="$NC"
         case "$status" in
-          pending) color="$YELLOW" ;;
-          running) color="$BLUE" ;;
-          done)    color="$GREEN" ;;
-          failed)  color="$RED" ;;
+          pending)    color="$YELLOW" ;;
+          running)    color="$BLUE" ;;
+          pr-created) color="$CYAN" ;;
+          done)       color="$GREEN" ;;
+          failed)     color="$RED" ;;
         esac
-        printf "  %-4s ${color}%-10s${NC} %-20s %-25s %s\n" "$id" "$status" "$project" "$branch" "$desc"
+        printf "  %-4s ${color}%-12s${NC} %-20s %-25s %s\n" "$id" "$status" "$project" "$branch" "$desc"
       done
       echo ""
       ;;
