@@ -262,6 +262,12 @@ _dev() {
     return 0
   fi
 
+  # task ls filter flags
+  if [ "$cmd" = "task" ] && [ "${COMP_WORDS[2]:-}" = "ls" ] && [ "$COMP_CWORD" -ge 3 ]; then
+    COMPREPLY=( $(compgen -W "--all --pending --running --done --failed --pr-created" -- "$cur") )
+    return 0
+  fi
+
   # kill flags
   if [ "$cmd" = "kill" ]; then
     COMPREPLY=( $(compgen -W "--all --project" -- "$cur") )

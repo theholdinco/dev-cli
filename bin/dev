@@ -58,7 +58,8 @@ DEFAULT_CONFIG='{
   },
   "defaults": {
     "agents": ["claude"],
-    "package_manager": "npm"
+    "package_manager": "npm",
+    "task_filter": "all"
   },
   "telegram": {
     "bot_token": "",
@@ -2764,9 +2765,25 @@ cmd_config() {
       esac
 
       echo ""
+      local cur_filter
+      cur_filter=$(get_config_value '.defaults.task_filter' 'all')
+      echo -e "  ${CYAN}3. Default task list filter${NC}"
+      echo "    1) all  2) pending  3) running  4) done  5) failed"
+      local filter_num=1
+      case "$cur_filter" in
+        pending) filter_num=2 ;; running) filter_num=3 ;; done) filter_num=4 ;; failed) filter_num=5 ;;
+      esac
+      read -rp "  Select [$filter_num]: " choice
+      local new_filter
+      case "${choice:-$filter_num}" in
+        2) new_filter="pending" ;; 3) new_filter="running" ;; 4) new_filter="done" ;; 5) new_filter="failed" ;;
+        *) new_filter="all" ;;
+      esac
+
+      echo ""
       local cur_accent
       cur_accent=$(get_config_value '.hub.theme.accent' 'cyan')
-      echo -e "  ${CYAN}3. Hub accent color${NC}"
+      echo -e "  ${CYAN}4. Hub accent color${NC}"
       echo "    1) cyan  2) green  3) blue  4) yellow  5) red"
       local accent_num=1
       case "$cur_accent" in
@@ -2782,12 +2799,12 @@ cmd_config() {
       echo ""
       local cur_refresh
       cur_refresh=$(get_config_value '.hub.refresh_seconds' '5')
-      echo -e "  ${CYAN}4. Hub refresh interval (seconds)${NC}"
+      echo -e "  ${CYAN}5. Hub refresh interval (seconds)${NC}"
       read -rp "  Seconds [$cur_refresh]: " new_refresh
       new_refresh="${new_refresh:-$cur_refresh}"
 
       echo ""
-      echo -e "  ${CYAN}5. Tmux window layout${NC}"
+      echo -e "  ${CYAN}6. Tmux window layout${NC}"
       local cur_windows
       cur_windows=$(get_tmux_windows "")
       local cur_win_names
@@ -2819,10 +2836,11 @@ cmd_config() {
       jq \
         --arg agent "$new_agent" \
         --arg pkg "$new_pkg" \
+        --arg filter "$new_filter" \
         --arg accent "$new_accent" \
         --argjson refresh "$new_refresh" \
         --argjson wins "$windows_json" \
-        '.defaults.agents = [$agent] | .defaults.package_manager = $pkg | .hub.theme.accent = $accent | .hub.refresh_seconds = $refresh | .tmux.windows = $wins' \
+        '.defaults.agents = [$agent] | .defaults.package_manager = $pkg | .defaults.task_filter = $filter | .hub.theme.accent = $accent | .hub.refresh_seconds = $refresh | .tmux.windows = $wins' \
         "$GLOBAL_CONFIG" > "$tmp"
       mv "$tmp" "$GLOBAL_CONFIG"
 
@@ -3600,10 +3618,50 @@ cmd_task() {
         info "No tasks. Add one with: dev task add <project> <branch> \"description\""
         return
       fi
+
+      # Parse filter flags
+      local filter=""
+      local i=3
+      while [ $i -le $# ]; do
+        local arg="${!i}"
+        case "$arg" in
+          --all)        filter="all" ;;
+          --pending)    filter="pending" ;;
+          --running)    filter="running" ;;
+          --done)       filter="done" ;;
+          --failed)     filter="failed" ;;
+          --pr-created) filter="pr-created" ;;
+          *) warn "Unknown flag: $arg" ;;
+        esac
+        i=$((i + 1))
+      done
+
+      # Fall back to configured default if no flag given
+      if [ -z "$filter" ]; then
+        filter=$(get_config_value '.defaults.task_filter' 'all')
+      fi
+
+      # Build jq filter
+      local jq_filter='.tasks[]'
+      if [ "$filter" != "all" ]; then
+        jq_filter=".tasks[] | select(.status == \"$filter\")"
+      fi
+
+      local count
+      count=$(jq "[${jq_filter}] | length" "$TASK_REGISTRY")
+      if [ "$count" -eq 0 ]; then
+        info "No tasks with status '${filter}'."
+        return
+      fi
+
       echo ""
+      if [ "$filter" != "all" ]; then
+        echo -e "  ${DIM}Showing: ${filter} (use --all to see all)${NC}"
+        echo ""
+      fi
       printf "  ${BOLD}%-4s %-12s %-20s %-25s %s${NC}\n" "ID" "STATUS" "PROJECT" "BRANCH" "DESCRIPTION"
       echo "  ─────────────────────────────────────────────────────────────────────────────────"
-      jq -r '.tasks[] | [.id, .status, .project, .branch, .description] | @tsv' "$TASK_REGISTRY" | \
+      jq -r "${jq_filter} | [.id, .status, .project, .branch, .description] | @tsv" "$TASK_REGISTRY" | \
       while IFS=$'\t' read -r id status project branch desc; do
         local color="$NC"
         case "$status" in
@@ -3654,7 +3712,7 @@ cmd_task() {
       echo "Usage: dev task <add|ls|rm|run|watch|log>"
       echo ""
       echo "  add <project> <branch> \"desc\"  Add a task to the queue"
-      echo "  ls                             List all tasks"
+      echo "  ls [--pending|--running|...]    List tasks (filter by status)"
       echo "  rm <id>                        Remove a task"
       echo "  run                            Run task runner (single pass)"
       echo "  watch                          Run task runner (watch mode)"
@@ -3922,7 +3980,8 @@ cmd_help() {
 
   TASKS (automated task queue)
     dev task add <project> <branch> "desc"  Add a task to the queue
-    dev task ls                             List all tasks with status
+    dev task ls [--pending|--running|--done|--failed|--pr-created|--all]
+                                            List tasks (filterable by status)
     dev task rm <id>                        Remove a task
     dev task run                            Run task runner (single pass)
     dev task watch                          Run task runner (watch mode)
