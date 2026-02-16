@@ -2729,7 +2729,10 @@ cmd_projects() {
 cmd_update() {
   local GITHUB_REPO="Patagon-Markets/dev-cli"
   local BRANCH="${1:-main}"
-  local TARBALL_URL="https://github.com/${GITHUB_REPO}/archive/refs/heads/${BRANCH}.tar.gz"
+  
+  if ! command -v gh &>/dev/null; then
+    die "GitHub CLI (gh) is required for update. Install: https://cli.github.com"
+  fi
 
   local tmp_dir
   tmp_dir=$(mktemp -d)
@@ -2737,10 +2740,10 @@ cmd_update() {
   trap "rm -rf '$tmp_dir'" EXIT
 
   info "Downloading latest dev-cli from GitHub (${BRANCH})..."
-  if ! curl -fsSL "$TARBALL_URL" -o "$tmp_dir/dev-cli.tar.gz"; then
+  if ! gh api "repos/${GITHUB_REPO}/tarball/${BRANCH}" > "$tmp_dir/dev-cli.tar.gz" 2>/dev/null; then
     rm -rf "$tmp_dir"
     trap - EXIT
-    die "Failed to download from GitHub. Check your internet connection."
+    die "Failed to download from GitHub. Check 'gh auth status'."
   fi
 
   info "Extracting..."
