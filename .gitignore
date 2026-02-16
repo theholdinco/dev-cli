@@ -5,3 +5,6 @@
 plans
 secrets/
 .env.local
+.task-done
+.task-pr-url
+TASK.md
