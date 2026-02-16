@@ -2000,8 +2000,17 @@ cmd_status() {
 
 cmd_gc() {
   ensure_dirs
+  local global=false
+  if [[ "${1:-}" == "--global" ]]; then
+    global=true
+  fi
+
   local sessions
-  sessions=$(jq -r 'keys[]' "$PORT_REGISTRY" 2>/dev/null)
+  if $global; then
+    sessions=$(jq -r 'keys[]' "$PORT_REGISTRY" 2>/dev/null)
+  else
+    sessions=$(jq -r --arg user "$USER" 'to_entries[] | select(.value.owner == $user) | .key' "$PORT_REGISTRY" 2>/dev/null)
+  fi
 
   if [ -z "$sessions" ]; then
     echo "No sessions to clean up."
@@ -3561,7 +3570,8 @@ cmd_help() {
     dev config project <name> --json        Edit project config JSON in $EDITOR
 
   MAINTENANCE
-    dev gc                                  Clean up dead sessions
+    dev gc                                  Clean up your dead sessions
+    dev gc --global                          Clean up all users' dead sessions
     dev stats                               Launch resource monitor (btop)
     dev mobile                              Mobile-friendly quick menu (alias: dev m)
     dev doctor                              System health check
@@ -3653,7 +3663,7 @@ case "${1:-help}" in
   send)      cmd_send "$@" ;;
   diff)      cmd_diff "$@" ;;
   sync)      cmd_sync "$@" ;;
-  gc)        cmd_gc ;;
+  gc)        cmd_gc "$@" ;;
   template)  cmd_template "$@" ;;
   config)    cmd_config "$@" ;;
   agent)     cmd_agent "$@" ;;
