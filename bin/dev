@@ -3210,7 +3210,14 @@ HOOKS_JSON
       else
         echo "$hooks_config" > "$settings_file"
       fi
-      log "Installed Claude Code hooks into $settings_file"
+      if [ -L "$settings_file" ]; then
+        local target
+        target=$(readlink -f "$settings_file")
+        log "Installed Claude Code hooks into $settings_file (symlink → $target)"
+        info "Note: hooks were written to your symlinked file. Make sure to commit the changes in your dotfiles."
+      else
+        log "Installed Claude Code hooks into $settings_file"
+      fi
 
       # Check if bot_token is configured
       local token
@@ -3232,10 +3239,17 @@ HOOKS_JSON
 
       # Check hooks in settings.json
       local settings_file="$HOME/.claude/settings.json"
+      local settings_display="$settings_file"
+      if [ -L "$settings_file" ]; then
+        settings_display="$settings_file → $(readlink -f "$settings_file")"
+      fi
       if [ -f "$settings_file" ] && jq -e '.hooks.Notification' "$settings_file" > /dev/null 2>&1; then
-        echo -e "  Hooks:   ${GREEN}●${NC} installed in $settings_file"
+        echo -e "  Hooks:   ${GREEN}●${NC} installed in $settings_display"
       else
         echo -e "  Hooks:   ${RED}●${NC} not installed (run 'dev notify setup')"
+        if [ -L "$settings_file" ]; then
+          echo -e "         ${YELLOW}⚠${NC}  settings.json is a symlink — hooks may have been lost when the file was replaced"
+        fi
       fi
 
       # Check bot token
