@@ -15,6 +15,7 @@ This creates the Linux user, installs dev-cli and Claude Code, sets up groups an
 Send the new user:
 - Temporary password (they'll be forced to change it on first login)
 - Server hostname: `ssh <username>@patagon`
+- Tailscale invite link (they must join the tailnet to reach the server)
 
 ### 3. Verify (optional)
 
@@ -28,7 +29,11 @@ cat /etc/dev-cli/ports.json   # their sessions should appear here
 
 ## User side
 
-### 1. First login
+### 1. Join Tailscale
+
+Install Tailscale and join the tailnet using the invite link from your admin. The server is only reachable through Tailscale.
+
+### 2. First login
 
 ```bash
 ssh <username>@patagon
@@ -36,20 +41,20 @@ ssh <username>@patagon
 
 You'll be prompted to change your password immediately.
 
-### 2. Authenticate services
+### 3. Authenticate services
 
 ```bash
 gh auth login       # GitHub — follow the prompts
 claude login        # Claude Code — opens browser auth
 ```
 
-### 3. Verify setup
+### 4. Verify setup
 
 ```bash
 dev doctor          # all tools should be green
 ```
 
-### 4. Fix ports.json (if needed)
+### 5. Fix ports.json (if needed)
 
 If `dev doctor` shows "ports.json — invalid JSON!", run:
 
@@ -57,7 +62,7 @@ If `dev doctor` shows "ports.json — invalid JSON!", run:
 echo '{}' > ~/.config/dev-cli/ports.json
 ```
 
-### 5. Start working
+### 6. Start working
 
 ```bash
 dev init <project>              # set up a project (first time only)
