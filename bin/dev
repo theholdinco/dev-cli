@@ -3160,7 +3160,10 @@ cmd_notify() {
   local subcmd="${2:-help}"
   case "$subcmd" in
     setup)
-      local settings_file="$HOME/.claude/settings.json"
+      # Use settings.local.json for hooks — these depend on claude-tg-notify
+      # which is machine-specific (only installed where dev-cli is).
+      # This avoids breaking shared dotfiles on machines without dev-cli.
+      local settings_file="$HOME/.claude/settings.local.json"
       mkdir -p "$HOME/.claude"
 
       local hooks_config
@@ -3203,20 +3206,22 @@ HOOKS_JSON
       )
 
       if [ -f "$settings_file" ]; then
-        # Merge hooks into existing settings
+        # Merge hooks into existing local settings
         local merged
         merged=$(jq -s '.[0] * .[1]' "$settings_file" <(echo "$hooks_config"))
         echo "$merged" > "$settings_file"
       else
         echo "$hooks_config" > "$settings_file"
       fi
-      if [ -L "$settings_file" ]; then
-        local target
-        target=$(readlink -f "$settings_file")
-        log "Installed Claude Code hooks into $settings_file (symlink → $target)"
-        info "Note: hooks were written to your symlinked file. Make sure to commit the changes in your dotfiles."
-      else
-        log "Installed Claude Code hooks into $settings_file"
+      log "Installed Claude Code hooks into $settings_file"
+
+      # Clean up hooks from settings.json if present (migrate to local)
+      local global_settings="$HOME/.claude/settings.json"
+      if [ -f "$global_settings" ] && jq -e '.hooks' "$global_settings" > /dev/null 2>&1; then
+        local cleaned
+        cleaned=$(jq 'del(.hooks)' "$global_settings")
+        echo "$cleaned" > "$global_settings"
+        info "Migrated hooks from settings.json to settings.local.json"
       fi
 
       # Check if bot_token is configured
@@ -3237,19 +3242,15 @@ HOOKS_JSON
       echo -e "${BOLD}Claude Code Notification Hooks${NC}"
       echo ""
 
-      # Check hooks in settings.json
-      local settings_file="$HOME/.claude/settings.json"
-      local settings_display="$settings_file"
-      if [ -L "$settings_file" ]; then
-        settings_display="$settings_file → $(readlink -f "$settings_file")"
-      fi
-      if [ -f "$settings_file" ] && jq -e '.hooks.Notification' "$settings_file" > /dev/null 2>&1; then
-        echo -e "  Hooks:   ${GREEN}●${NC} installed in $settings_display"
+      # Check hooks in settings.local.json (preferred) or settings.json (legacy)
+      local local_settings="$HOME/.claude/settings.local.json"
+      local global_settings="$HOME/.claude/settings.json"
+      if [ -f "$local_settings" ] && jq -e '.hooks.Notification' "$local_settings" > /dev/null 2>&1; then
+        echo -e "  Hooks:   ${GREEN}●${NC} installed in $local_settings"
+      elif [ -f "$global_settings" ] && jq -e '.hooks.Notification' "$global_settings" > /dev/null 2>&1; then
+        echo -e "  Hooks:   ${YELLOW}●${NC} installed in $global_settings (consider running 'dev notify setup' to migrate to settings.local.json)"
       else
         echo -e "  Hooks:   ${RED}●${NC} not installed (run 'dev notify setup')"
-        if [ -L "$settings_file" ]; then
-          echo -e "         ${YELLOW}⚠${NC}  settings.json is a symlink — hooks may have been lost when the file was replaced"
-        fi
       fi
 
       # Check bot token
