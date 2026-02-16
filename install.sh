@@ -32,7 +32,7 @@ echo "  Installing dev-cli..."
 echo ""
 
 # Ensure directories
-mkdir -p "$BIN_DIR" "$CONFIG_DIR"/{templates,hooks,projects,logs,secrets}
+mkdir -p "$BIN_DIR" "$CONFIG_DIR"/{templates,hooks,projects,logs,secrets,prompts}
 mkdir -p "$HOME/images"
 
 # Install binaries (atomic mv so a running 'dev' process isn't corrupted mid-read)
@@ -53,6 +53,18 @@ mkdir -p "$WEB_DIR"
 if [ -d "$REPO_DIR/web" ]; then
   cp -r "$REPO_DIR/web/"* "$WEB_DIR/"
   log "Installed web dashboard to $WEB_DIR/"
+fi
+
+# Install default prompt templates (don't overwrite user customizations)
+if [ -d "$REPO_DIR/prompts" ]; then
+  for pf in "$REPO_DIR/prompts/"*.md; do
+    [ -f "$pf" ] || continue
+    _basename=$(basename "$pf")
+    if [ ! -f "$CONFIG_DIR/prompts/$_basename" ]; then
+      cp "$pf" "$CONFIG_DIR/prompts/$_basename"
+      log "Installed default prompt: $_basename"
+    fi
+  done
 fi
 
 # Set up Python venv if python3 available
@@ -179,10 +191,10 @@ _dev() {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
   # All available commands
-  commands="init setup new ls attach kill hub dashboard ports logs url supabase pr shell worktree img projects update help status restart send diff sync gc template config agent stats doctor web bot services notify mobile m task ask ghost vibes fortune lenny"
+  commands="init setup new ls attach kill hub dashboard ports logs url supabase pr shell worktree img projects update help status restart send diff sync gc template config agent stats doctor web bot services notify mobile m task ask ghost review vibes fortune lenny"
 
   # Commands that take a session name as argument
-  session_cmds="attach kill logs url shell pr status restart send diff sync"
+  session_cmds="attach kill logs url shell pr status restart send diff sync review"
 
   # Commands that take a project name as argument
   project_cmds="new setup template worktree ask"

@@ -303,6 +303,81 @@ complete_task() {
   fi
 
   log "Task $id is now pr-created — waiting for PR to be merged"
+
+  # Auto-start a review session for this PR
+  if [ -n "$pr_url" ]; then
+    start_review "$id" "$pr_url"
+  fi
+}
+
+# ── Auto PR Review ────────────────────────────────────────────────────────────
+
+start_review() {
+  local task_id="$1" pr_url="$2"
+
+  local project branch
+  project=$(task_field "$task_id" "project")
+  branch=$(task_field "$task_id" "branch")
+
+  log "Starting auto-review for task $task_id (PR: $pr_url)"
+
+  # Launch review via dev review command
+  local review_output
+  review_output=$(dev review "$pr_url" --yolo 2>&1) || true
+
+  if echo "$review_output" | sed 's/\x1b\[[0-9;]*m//g' | grep -q "Session:"; then
+    local review_session
+    review_session=$(echo "$review_output" | sed 's/\x1b\[[0-9;]*m//g' | grep -oP 'Session:\s+\K\S+' | head -1)
+    log "Review session started: $review_session for task $task_id"
+    update_task "$task_id" "review_session" "$review_session"
+  else
+    log "WARNING: Failed to start review session for task $task_id: $(echo "$review_output" | tail -3)"
+  fi
+}
+
+check_reviews() {
+  [ -f "$TASK_REGISTRY" ] || return 0
+
+  # Find pr-created tasks that have a review session
+  local review_tasks
+  review_tasks=$(jq -r '.tasks[] | select(.status == "pr-created" and .review_session != null and .review_session != "") | .id' "$TASK_REGISTRY" 2>/dev/null)
+  [ -n "$review_tasks" ] || return 0
+
+  while IFS= read -r id; do
+    local review_session
+    review_session=$(task_field "$id" "review_session")
+    [ -n "$review_session" ] && [ "$review_session" != "null" ] || continue
+
+    # Find the review session's worktree
+    local review_path
+    review_path=$(jq -r --arg s "$review_session" '.[$s].path // empty' "$PORT_REGISTRY" 2>/dev/null)
+    [ -n "$review_path" ] && [ -d "$review_path" ] || continue
+
+    # Check for .review-done marker
+    if [ -f "$review_path/.review-done" ]; then
+      log "Review completed for task $id (session: $review_session)"
+
+      # Notify via Telegram
+      local pr_url
+      pr_url=$(task_field "$id" "pr_url")
+      local description
+      description=$(task_field "$id" "description")
+      local hostname
+      hostname=$(hostname 2>/dev/null || echo "unknown")
+
+      send_telegram "📝 *PR Review Submitted*
+
+📋 *Task #${id}:* ${description}
+🔗 [View PR](${pr_url})
+🖥 *Host:* \`${hostname}\`
+
+_An automated code review has been posted on the PR._"
+
+      # Kill the review session
+      dev kill "$review_session" -f 2>&1 | tail -3 >> "$LOG_FILE" || true
+      log "Review session $review_session cleaned up"
+    fi
+  done <<< "$review_tasks"
 }
 
 # ── Check pr-created tasks for merged PRs ────────────────────────────────────
@@ -353,6 +428,7 @@ check_merged() {
 run_once() {
   process_pending
   check_running
+  check_reviews
   check_merged
 }
 
