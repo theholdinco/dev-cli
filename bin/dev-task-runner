@@ -17,6 +17,7 @@
 set -euo pipefail
 
 CONFIG_DIR="$HOME/.config/dev-cli"
+GLOBAL_CONFIG="$CONFIG_DIR/config.json"
 TASK_REGISTRY="$CONFIG_DIR/tasks.json"
 LOG_DIR="$CONFIG_DIR/logs"
 LOG_FILE="$LOG_DIR/task-runner.log"
@@ -55,6 +56,53 @@ update_task() {
   jq --arg id "$id" --arg f "$field" --arg v "$value" \
     '(.tasks[] | select(.id == $id))[$f] = $v' "$TASK_REGISTRY" > "$tmp" \
     && mv "$tmp" "$TASK_REGISTRY"
+}
+
+# ── Telegram notifications ───────────────────────────────────────────────────
+
+send_telegram() {
+  local text="$1"
+
+  [ -f "$GLOBAL_CONFIG" ] || return 0
+
+  local token
+  token=$(jq -r '.telegram.bot_token // empty' "$GLOBAL_CONFIG" 2>/dev/null)
+  [ -n "$token" ] || return 0
+
+  local chat_ids
+  chat_ids=$(jq -r '.telegram.allowed_chat_ids[]?' "$GLOBAL_CONFIG" 2>/dev/null || true)
+  [ -n "$chat_ids" ] || return 0
+
+  while IFS= read -r chat_id; do
+    [ -n "$chat_id" ] || continue
+    curl -s -X POST "https://api.telegram.org/bot${token}/sendMessage" \
+      -d chat_id="$chat_id" \
+      -d text="$text" \
+      -d parse_mode="Markdown" > /dev/null 2>&1 || true
+  done <<< "$chat_ids"
+}
+
+notify_pr_ready() {
+  local id="$1" pr_url="$2"
+  local project branch description
+  project=$(task_field "$id" "project")
+  branch=$(task_field "$id" "branch")
+  description=$(task_field "$id" "description")
+
+  local hostname
+  hostname=$(hostname 2>/dev/null || echo "unknown")
+
+  local text="🔔 *PR Ready for Review*
+
+📋 *Task #${id}:* ${description}
+📦 *Project:* \`${project}\`
+🌿 *Branch:* \`${branch}\`
+🖥 *Host:* \`${hostname}\`
+
+🔗 [Review PR](${pr_url})"
+
+  send_telegram "$text"
+  log "Telegram notification sent for task $id PR: $pr_url"
 }
 
 # ── Process one pending task ─────────────────────────────────────────────────
@@ -210,6 +258,7 @@ complete_task() {
   if [ -n "$pr_url" ]; then
     update_task "$id" "pr_url" "$pr_url"
     update_task "$id" "status" "pr-created"
+    notify_pr_ready "$id" "$pr_url"
     log "PR found: $pr_url"
   else
     # Fallback: AI didn't create a PR, create one ourselves
@@ -238,6 +287,7 @@ complete_task() {
       pr_url=$(echo "$pr_output" | grep -oP 'https://\S+' | head -1)
       update_task "$id" "pr_url" "$pr_url"
       update_task "$id" "status" "pr-created"
+      notify_pr_ready "$id" "$pr_url"
       log "Fallback PR created: $pr_url"
     else
       log "WARNING: PR creation may have failed: $pr_output"
