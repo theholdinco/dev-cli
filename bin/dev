@@ -1551,12 +1551,27 @@ cmd_kill() {
   local worktree_path project
   worktree_path=$(get_session_field "$name" "path")
   project=$(get_session_field "$name" "project")
-  local bare_dir="$PROJECTS_DIR/$project"
+  local session_type
+  session_type=$(get_session_field "$name" "type")
 
   info "Tearing down session '$name'..."
 
   # Kill tmux session
   tmux kill-session -t "$name" 2>/dev/null && log "Killed tmux session" || warn "tmux session already gone"
+
+  # Ghost sessions have no repo — just clean up the temp dir and unregister
+  if [ "$session_type" = "ghost" ]; then
+    if [ -d "$worktree_path" ]; then
+      rm -rf "$worktree_path"
+      log "Removed temp directory"
+    fi
+    unregister_session "$name"
+    log "Session '$name' fully cleaned up"
+    random_farewell
+    return 0
+  fi
+
+  local bare_dir="$PROJECTS_DIR/$project"
 
   # Stop Supabase if running in this worktree
   if [ -d "$worktree_path/supabase" ]; then
@@ -1585,8 +1600,6 @@ cmd_kill() {
   # Delete the local branch so the same branch name can be reused with dev new.
   # Remote branch is untouched — only the local ref is removed.
   # Skip for ask sessions (they use detached HEAD, no local branch to delete).
-  local session_type
-  session_type=$(get_session_field "$name" "type")
   if [ -n "$branch" ] && [ "$session_type" != "ask" ]; then
     if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
       # Try safe delete first (fails if branch has unmerged/unpushed commits)
@@ -4106,6 +4119,130 @@ cmd_ask() {
   echo ""
 }
 
+cmd_ghost() {
+  local agent="claude" yolo=false name_suffix="" prompt=""
+  shift || true
+
+  # Parse options
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --agent) agent="${2:-claude}"; shift 2 ;;
+      --agent=*) agent="${1#*=}"; shift ;;
+      --yolo) yolo=true; shift ;;
+      --name) name_suffix="${2:-}"; shift 2 ;;
+      --name=*) name_suffix="${1#*=}"; shift ;;
+      *)
+        if [ -z "$prompt" ]; then
+          prompt="$1"
+        else
+          prompt="$prompt $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  # Generate session name
+  local ts
+  ts=$(date +%s)
+  if [ -n "$name_suffix" ]; then
+    local slug
+    slug=$(slugify "$name_suffix")
+    local name="${USER}-ghost-${slug}"
+  else
+    local name="${USER}-ghost-${ts}"
+  fi
+
+  # Check for existing session with same name
+  [ -z "$(get_session "$name")" ] || die "Session '$name' already exists."
+
+  # Create a temporary working directory (no repo)
+  local tmp_dir="/tmp/dev-ghost-${ts}"
+  mkdir -p "$tmp_dir"
+
+  # Register in port registry (no slot, no ports, no project)
+  local agents_json
+  agents_json=$(echo "$agent" | jq -R . | jq -s .)
+  (
+    flock -x 200
+    local tmp
+    tmp=$(mktemp)
+    jq --arg name "$name" \
+       --arg agent "$agent" \
+       --argjson agents "$agents_json" \
+       --arg path "$tmp_dir" \
+       --arg owner "$USER" \
+       --arg created "$(date -Iseconds)" \
+       '.[$name] = {
+          project: "ghost",
+          branch: "none",
+          slot: 0,
+          agent: $agent,
+          agents: $agents,
+          path: $path,
+          owner: $owner,
+          type: "ghost",
+          ports: {
+            frontend: null,
+            backend: null,
+            supa_api: null,
+            supa_db: null,
+            supa_studio: null
+          },
+          created: $created
+        }' "$PORT_REGISTRY" > "$tmp"
+    mv "$tmp" "$PORT_REGISTRY"
+    fix_registry_perms
+  ) 200>"${PORT_REGISTRY}.lock"
+
+  # Source secrets
+  local env_prefix=""
+  if [ -f "$SECRETS_FILE" ]; then
+    env_prefix="source $SECRETS_FILE && "
+  fi
+
+  # Build agent command
+  local claude_flags=""
+  [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
+
+  local agent_cmd
+  case "$agent" in
+    claude)
+      if [ -n "$prompt" ]; then
+        agent_cmd="cd $tmp_dir && claude${claude_flags} \"$prompt\""
+      else
+        agent_cmd="cd $tmp_dir && claude${claude_flags}"
+      fi
+      ;;
+    codex)
+      agent_cmd="cd $tmp_dir && codex"
+      ;;
+    none)
+      agent_cmd="cd $tmp_dir && echo 'Ready. No agent started.' && bash"
+      ;;
+    *)
+      die "Unknown agent: $agent. Use claude, codex, or none."
+      ;;
+  esac
+
+  # Create tmux session with agent + shell (no server window)
+  tmux new-session -d -s "$name" -n "agent" "${env_prefix}${agent_cmd}"
+  tmux new-window -t "$name" -n "shell" "cd $tmp_dir && bash"
+  tmux select-window -t "$name:1"
+
+  log "Ghost session '$name' is running!"
+  random_celebration
+  echo ""
+  echo -e "  ${BOLD}Session:${NC}  $name"
+  echo -e "  ${BOLD}Agent:${NC}    $agent"
+  echo -e "  ${BOLD}Type:${NC}     ghost ${DIM}(no project, no ports)${NC}"
+  echo -e "  ${BOLD}Path:${NC}     $tmp_dir"
+  echo ""
+  echo -e "  ${DIM}Attach:    dev attach $name${NC}"
+  echo -e "  ${DIM}Kill:      dev kill $name${NC}"
+  echo ""
+}
+
 cmd_vibes() {
   local arts=(
     "
@@ -4240,6 +4377,10 @@ cmd_help() {
                                             --agent claude|codex (default: claude)
                                             --print  One-shot answer, no tmux session
                                             --yolo   Skip permissions (Claude only)
+    dev ghost [prompt]                      Start a standalone AI session (no project/repo)
+                                            --agent claude|codex|none (default: claude)
+                                            --name <label>  Custom session name
+                                            --yolo   Skip permissions (Claude only)
     dev hub                                 Interactive TUI control center
     dev dashboard                           Split-pane view of all agents (read-only)
 
@@ -4346,6 +4487,8 @@ cmd_help() {
     dev new klyra fix/auth-bug --agents claude,codex
     dev ask klyra "how does the auth flow work?"
     dev ask klyra                                # interactive session
+    dev ghost                                    # standalone AI, no project
+    dev ghost --name research "explain OAuth2"   # named ghost session
     dev agent add klyra-feat-trading-ui codex
     dev ls
     dev attach klyra-feat-trading-ui
@@ -4410,6 +4553,7 @@ case "${1:-help}" in
   task)      cmd_task "$@" ;;
   notify)    cmd_notify "$@" ;;
   ask)       cmd_ask "$@" ;;
+  ghost)     cmd_ghost "$@" ;;
   mobile|m)  cmd_mobile ;;
   vibes)     cmd_vibes ;;
   fortune)   cmd_fortune ;;
