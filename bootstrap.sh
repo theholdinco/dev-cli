@@ -476,7 +476,6 @@ if id "$USERNAME" &>/dev/null; then
 else
   useradd -m -s /bin/bash "$USERNAME"
   echo "$USERNAME:$TEMP_PASS" | chpasswd
-  chage -d 0 "$USERNAME"
   echo "  ✓ User created with temporary password"
 fi
 
@@ -548,6 +547,9 @@ NVM_INIT
     echo "  ✓ nvm sourced in .bashrc"
   fi
 fi
+
+# Force password change on first login (must be after all su - commands)
+chage -d 0 "$USERNAME"
 
 echo ""
 echo "============================================"
