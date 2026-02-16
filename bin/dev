@@ -13,7 +13,8 @@ set -euo pipefail
 # ── Config ──────────────────────────────────────────────────────────────────
 PROJECTS_DIR="$HOME/projects"
 CONFIG_DIR="$HOME/.config/dev-cli"
-PORT_REGISTRY="$CONFIG_DIR/ports.json"
+GLOBAL_PORT_REGISTRY="/etc/dev-cli/ports.json"
+PORT_REGISTRY="$GLOBAL_PORT_REGISTRY"
 SECRETS_FILE="$CONFIG_DIR/secrets.env"
 LOG_DIR="$CONFIG_DIR/logs"
 WEB_DIR="$HOME/.local/share/dev-cli/web"
@@ -81,7 +82,16 @@ warn() { echo -e "${YELLOW}!${NC} $1"; }
 
 ensure_dirs() {
   mkdir -p "$CONFIG_DIR" "$LOG_DIR" "$CONFIG_DIR/projects"
-  [ -f "$PORT_REGISTRY" ] || echo '{}' > "$PORT_REGISTRY"
+  # Use global port registry if writable, otherwise fall back to local
+  if [ -d "/etc/dev-cli" ] && [ -w "/etc/dev-cli" ]; then
+    PORT_REGISTRY="$GLOBAL_PORT_REGISTRY"
+    [ -f "$PORT_REGISTRY" ] || echo '{}' > "$PORT_REGISTRY"
+  elif [ -f "$GLOBAL_PORT_REGISTRY" ] && [ -w "$GLOBAL_PORT_REGISTRY" ]; then
+    PORT_REGISTRY="$GLOBAL_PORT_REGISTRY"
+  else
+    PORT_REGISTRY="$CONFIG_DIR/ports.json"
+    [ -f "$PORT_REGISTRY" ] || echo '{}' > "$PORT_REGISTRY"
+  fi
   [ -f "$GLOBAL_CONFIG" ] || echo "$DEFAULT_CONFIG" > "$GLOBAL_CONFIG"
 }
 
@@ -192,7 +202,7 @@ slugify() {
 # Session name: project-branch
 session_name() {
   local project="$1" branch="$2"
-  echo "${project}-$(slugify "$branch")"
+  echo "${USER}-${project}-$(slugify "$branch")"
 }
 
 # ── Port Management ─────────────────────────────────────────────────────────
@@ -245,49 +255,55 @@ register_session() {
   local agents_json
   agents_json=$(echo "$agent" | tr ',' '\n' | jq -R . | jq -s .)
 
-  local tmp
-  tmp=$(mktemp)
-  jq --arg name "$name" \
-     --arg project "$project" \
-     --arg branch "$branch" \
-     --argjson slot "$slot" \
-     --arg agent "$agent" \
-     --argjson agents "$agents_json" \
-     --arg path "$worktree_path" \
-     --arg owner "$USER" \
-     --argjson frontend "$frontend" \
-     --argjson backend "$backend" \
-     --argjson supa_api "$supa_api" \
-     --argjson supa_db "$supa_db" \
-     --argjson supa_studio "$supa_studio" \
-     --arg created "$(date -Iseconds)" \
-     '.[$name] = {
-        project: $project,
-        branch: $branch,
-        slot: $slot,
-        agent: $agent,
-        agents: $agents,
-        path: $path,
-        owner: $owner,
-        ports: {
-          frontend: $frontend,
-          backend: $backend,
-          supa_api: $supa_api,
-          supa_db: $supa_db,
-          supa_studio: $supa_studio
-        },
-        created: $created
-      }' "$PORT_REGISTRY" > "$tmp"
-  mv "$tmp" "$PORT_REGISTRY"
+  (
+    flock -x 200
+    local tmp
+    tmp=$(mktemp)
+    jq --arg name "$name" \
+       --arg project "$project" \
+       --arg branch "$branch" \
+       --argjson slot "$slot" \
+       --arg agent "$agent" \
+       --argjson agents "$agents_json" \
+       --arg path "$worktree_path" \
+       --arg owner "$USER" \
+       --argjson frontend "$frontend" \
+       --argjson backend "$backend" \
+       --argjson supa_api "$supa_api" \
+       --argjson supa_db "$supa_db" \
+       --argjson supa_studio "$supa_studio" \
+       --arg created "$(date -Iseconds)" \
+       '.[$name] = {
+          project: $project,
+          branch: $branch,
+          slot: $slot,
+          agent: $agent,
+          agents: $agents,
+          path: $path,
+          owner: $owner,
+          ports: {
+            frontend: $frontend,
+            backend: $backend,
+            supa_api: $supa_api,
+            supa_db: $supa_db,
+            supa_studio: $supa_studio
+          },
+          created: $created
+        }' "$PORT_REGISTRY" > "$tmp"
+    mv "$tmp" "$PORT_REGISTRY"
+  ) 200>"${PORT_REGISTRY}.lock"
 }
 
 # Unregister a session
 unregister_session() {
   local name="$1"
-  local tmp
-  tmp=$(mktemp)
-  jq "del(.[\"$name\"])" "$PORT_REGISTRY" > "$tmp"
-  mv "$tmp" "$PORT_REGISTRY"
+  (
+    flock -x 200
+    local tmp
+    tmp=$(mktemp)
+    jq "del(.[\"$name\"])" "$PORT_REGISTRY" > "$tmp"
+    mv "$tmp" "$PORT_REGISTRY"
+  ) 200>"${PORT_REGISTRY}.lock"
 }
 
 # Get session info

@@ -107,6 +107,22 @@ sudo apt install -y \
 log "System packages installed"
 
 # ---------------------------------------------------------------------------
+# 2b. Shared multi-user infrastructure
+# ---------------------------------------------------------------------------
+info "Setting up shared multi-user infrastructure..."
+sudo groupadd -f devs
+sudo usermod -aG devs "$USER"
+sudo mkdir -p /etc/dev-cli
+sudo chown :devs /etc/dev-cli
+sudo chmod g+ws /etc/dev-cli
+if [ ! -f /etc/dev-cli/ports.json ]; then
+  echo '{}' | sudo tee /etc/dev-cli/ports.json > /dev/null
+  sudo chown :devs /etc/dev-cli/ports.json
+  sudo chmod g+w /etc/dev-cli/ports.json
+fi
+log "Shared infrastructure ready (/etc/dev-cli, devs group)"
+
+# ---------------------------------------------------------------------------
 # 3. Homebrew
 # ---------------------------------------------------------------------------
 if command -v brew &>/dev/null; then
@@ -431,8 +447,9 @@ sudo tee /usr/local/bin/add-dev-user > /dev/null << 'ADD_USER_SCRIPT'
 #
 # Usage: sudo add-dev-user <username>
 #
-# Creates a Linux user, adds to docker group, installs dev-cli,
-# and links shared project secrets.
+# Creates a Linux user with a temporary password, adds to required groups,
+# installs dev-cli and Claude Code, copies tmux config, and sets up
+# Homebrew in their PATH.
 ###############################################################################
 
 set -euo pipefail
@@ -450,17 +467,22 @@ fi
 
 echo "Creating user: $USERNAME"
 
+# Generate a temporary password
+TEMP_PASS=$(openssl rand -base64 12)
+
 # Create user with home directory
 if id "$USERNAME" &>/dev/null; then
   echo "User '$USERNAME' already exists, skipping creation"
 else
   useradd -m -s /bin/bash "$USERNAME"
-  echo "  ✓ User created"
+  echo "$USERNAME:$TEMP_PASS" | chpasswd
+  chage -d 0 "$USERNAME"
+  echo "  ✓ User created with temporary password"
 fi
 
-# Add to docker and sudo groups
-usermod -aG docker,sudo "$USERNAME" 2>/dev/null || true
-echo "  ✓ Added to docker and sudo groups"
+# Add to docker, sudo, and devs groups
+usermod -aG docker,sudo,devs "$USERNAME" 2>/dev/null || true
+echo "  ✓ Added to docker, sudo, and devs groups"
 
 # Install dev-cli for the user
 DEV_CLI_REPO="/opt/dev-cli"
@@ -469,6 +491,34 @@ if [ -d "$DEV_CLI_REPO" ]; then
   echo "  ✓ dev-cli installed"
 else
   echo "  ! dev-cli repo not found at $DEV_CLI_REPO — install manually"
+fi
+
+# Install Claude Code for the user
+echo "  → Installing Claude Code..."
+su - "$USERNAME" -c 'curl -fsSL https://claude.ai/install.sh | bash' 2>/dev/null || true
+echo "  ✓ Claude Code installed (user must run 'claude login' on first use)"
+
+# Copy tmux config if available
+for tmux_src in /etc/skel/.tmux.conf /home/*/.tmux.conf; do
+  if [ -f "$tmux_src" ]; then
+    cp "$tmux_src" "/home/$USERNAME/.tmux.conf"
+    chown "$USERNAME:$USERNAME" "/home/$USERNAME/.tmux.conf"
+    echo "  ✓ tmux config copied"
+    break
+  fi
+done
+
+# Set up Homebrew in PATH
+BREW_PREFIX="/home/linuxbrew/.linuxbrew"
+if [ -d "$BREW_PREFIX" ]; then
+  if ! grep -q 'linuxbrew' "/home/$USERNAME/.bashrc" 2>/dev/null; then
+    cat >> "/home/$USERNAME/.bashrc" << 'BREW_INIT'
+
+# Homebrew
+eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+BREW_INIT
+    echo "  ✓ Homebrew added to PATH"
+  fi
 fi
 
 # Link shared secrets
@@ -500,10 +550,20 @@ NVM_INIT
 fi
 
 echo ""
-echo "Done! Next steps for $USERNAME:"
-echo "  1. Ensure the user is on your Tailscale tailnet"
-echo "  2. User logs in:  ssh $USERNAME@<tailscale-hostname>"
-echo "  3. User runs:     dev doctor"
+echo "============================================"
+echo "  User '$USERNAME' created successfully!"
+echo "============================================"
+echo ""
+echo "  Temporary password: $TEMP_PASS"
+echo "  (User will be forced to change it on first login)"
+echo ""
+echo "  Next steps:"
+echo "  1. Share the temp password with $USERNAME securely"
+echo "  2. Ensure they are on your Tailscale tailnet"
+echo "  3. They log in:  ssh $USERNAME@$(hostname)"
+echo "  4. They run:     claude login"
+echo "  5. They run:     dev doctor"
+echo ""
 ADD_USER_SCRIPT
 sudo chmod +x /usr/local/bin/add-dev-user
 log "add-dev-user helper installed at /usr/local/bin/add-dev-user"

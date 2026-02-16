@@ -9,7 +9,12 @@
 set -euo pipefail
 
 CONFIG_DIR="$HOME/.config/dev-cli"
-PORT_REGISTRY="$CONFIG_DIR/ports.json"
+GLOBAL_PORT_REGISTRY="/etc/dev-cli/ports.json"
+if [ -f "$GLOBAL_PORT_REGISTRY" ] && [ -r "$GLOBAL_PORT_REGISTRY" ]; then
+  PORT_REGISTRY="$GLOBAL_PORT_REGISTRY"
+else
+  PORT_REGISTRY="$CONFIG_DIR/ports.json"
+fi
 PROJECTS_DIR="$HOME/projects"
 
 # Colors
