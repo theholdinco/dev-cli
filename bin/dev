@@ -891,7 +891,7 @@ cmd_setup() {
 }
 
 cmd_new() {
-  local project="${2:-}" branch="${3:-}" agent="" agents_flag="" run_cmd="" yolo=false
+  local project="${2:-}" branch="${3:-}" agent="" agents_flag="" run_cmd="" yolo=false attach=false
   shift 2 || true
 
   # Parse options
@@ -904,6 +904,7 @@ cmd_new() {
       --run) run_cmd="${2:-}"; shift 2 ;;
       --run=*) run_cmd="${1#*=}"; shift ;;
       --yolo) yolo=true; shift ;;
+      --attach) attach=true; shift ;;
       *) shift ;;
     esac
   done
@@ -932,8 +933,8 @@ cmd_new() {
     [ "$config_yolo" = "true" ] && yolo=true
   fi
 
-  [ -z "$project" ] && die "Usage: dev new <project> <branch> [--agent claude|codex|none] [--agents claude,codex] [--yolo]"
-  [ -z "$branch" ] && die "Usage: dev new <project> <branch> [--agent claude|codex|none] [--agents claude,codex] [--yolo]"
+  [ -z "$project" ] && die "Usage: dev new <project> <branch> [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach]"
+  [ -z "$branch" ] && die "Usage: dev new <project> <branch> [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach]"
 
   local bare_dir="$PROJECTS_DIR/$project"
   local wt_dir="$PROJECTS_DIR/${project}-worktrees"
@@ -1135,6 +1136,10 @@ cmd_new() {
   win_names=$(get_tmux_windows "$project" | jq -r '.[].name' | paste -sd' | ' -)
   echo -e "  ${DIM}Windows:   $win_names${NC}"
   echo ""
+
+  if [ "$attach" = true ]; then
+    tmux attach-session -t "$name"
+  fi
 }
 
 cmd_ls() {
@@ -3949,10 +3954,11 @@ cmd_help() {
     dev help                                Show this help
 
   SESSIONS
-    dev new <project> <branch> [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--run "<cmd>"]
+    dev new <project> <branch> [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--run "<cmd>"]
                                             Create worktree + start agent(s)
                                             --agents starts multiple agents (comma-separated)
                                             --yolo launches Claude with --dangerously-skip-permissions
+                                            --attach auto-attach to the session after creation
                                             --run auto-starts a command in the server window
     dev ls                                  List your active sessions
     dev ls --all                              List all users' sessions
