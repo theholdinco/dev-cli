@@ -191,9 +191,20 @@ complete_task() {
   cd "$worktree"
 
   # Read PR URL from marker file (created by the AI agent)
-  local pr_url=""
+  local pr_url="" branch
+  branch=$(task_field "$id" "branch")
   if [ -f "$worktree/.task-pr-url" ]; then
     pr_url=$(grep -oP 'https://\S+' "$worktree/.task-pr-url" | head -1)
+  fi
+
+  # Validate the PR actually belongs to this task's branch
+  if [ -n "$pr_url" ]; then
+    local pr_branch
+    pr_branch=$(gh pr view "$pr_url" --json headRefName --jq '.headRefName' 2>/dev/null) || true
+    if [ "$pr_branch" != "$branch" ]; then
+      log "WARNING: PR $pr_url is for branch '$pr_branch', not '$branch' — ignoring stale PR URL"
+      pr_url=""
+    fi
   fi
 
   if [ -n "$pr_url" ]; then
@@ -211,8 +222,6 @@ complete_task() {
     fi
 
     # Push branch
-    local branch
-    branch=$(task_field "$id" "branch")
     git push -u origin "$branch" 2>&1 | tail -5 >> "$LOG_FILE" || true
     log "Pushed branch $branch"
 
@@ -240,8 +249,6 @@ complete_task() {
   if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
     git add -A
     git commit -m "Clean up task files" --no-verify 2>&1 >> "$LOG_FILE" || true
-    local branch
-    branch=$(task_field "$id" "branch")
     git push origin "$branch" 2>&1 >> "$LOG_FILE" || true
   fi
 
