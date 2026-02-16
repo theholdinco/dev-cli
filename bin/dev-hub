@@ -464,7 +464,7 @@ action_kill() {
   echo ""
 
   if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-    dev kill "$name" 2>&1
+    dev kill "$name" --force 2>&1
     sleep 1
   fi
 }

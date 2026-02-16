@@ -1296,13 +1296,14 @@ cmd_attach() {
 }
 
 cmd_kill() {
-  # Handle --all and --project flags
-  local kill_all=false kill_project=""
+  # Handle --all, --project, and --force flags
+  local kill_all=false kill_project="" force=false
   local args=("$@")
   local positional=()
   for arg in "${args[@]}"; do
     case "$arg" in
       --all) kill_all=true ;;
+      -f|--force) force=true ;;
       --project) kill_project="__NEXT__" ;;
       --project=*) kill_project="${arg#*=}" ;;
       *)
@@ -1322,18 +1323,20 @@ cmd_kill() {
       echo "No sessions to kill."
       return 0
     fi
-    echo ""
-    echo -e "  ${YELLOW}Kill ALL sessions?${NC}"
-    echo ""
+    if [ "$force" != true ]; then
+      echo ""
+      echo -e "  ${YELLOW}Kill ALL sessions?${NC}"
+      echo ""
+      while IFS= read -r s; do
+        echo "    $s"
+      done <<< "$sessions"
+      echo ""
+      echo -ne "  ${YELLOW}Confirm? [y/N]:${NC} "
+      read -r confirm
+      [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || { echo "  Cancelled."; return 0; }
+    fi
     while IFS= read -r s; do
-      echo "    $s"
-    done <<< "$sessions"
-    echo ""
-    echo -ne "  ${YELLOW}Confirm? [y/N]:${NC} "
-    read -r confirm
-    [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || { echo "  Cancelled."; return 0; }
-    while IFS= read -r s; do
-      cmd_kill "kill" "$s"
+      cmd_kill "kill" "$s" --force
     done <<< "$sessions"
     return 0
   fi
@@ -1345,36 +1348,117 @@ cmd_kill() {
       echo "No sessions for project '$kill_project'."
       return 0
     fi
-    echo ""
-    echo -e "  ${YELLOW}Kill all sessions for project '$kill_project'?${NC}"
-    echo ""
+    if [ "$force" != true ]; then
+      echo ""
+      echo -e "  ${YELLOW}Kill all sessions for project '$kill_project'?${NC}"
+      echo ""
+      while IFS= read -r s; do
+        echo "    $s"
+      done <<< "$sessions"
+      echo ""
+      echo -ne "  ${YELLOW}Confirm? [y/N]:${NC} "
+      read -r confirm
+      [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || { echo "  Cancelled."; return 0; }
+    fi
     while IFS= read -r s; do
-      echo "    $s"
-    done <<< "$sessions"
-    echo ""
-    echo -ne "  ${YELLOW}Confirm? [y/N]:${NC} "
-    read -r confirm
-    [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || { echo "  Cancelled."; return 0; }
-    while IFS= read -r s; do
-      cmd_kill "kill" "$s"
+      cmd_kill "kill" "$s" --force
     done <<< "$sessions"
     return 0
   fi
 
   local name="${positional[1]:-}"
-  [ -z "$name" ] && die "Usage: dev kill <session> [--all] [--project <name>]"
+  [ -z "$name" ] && die "Usage: dev kill <session> [--all] [--project <name>] [-f|--force]"
 
-  # Support partial matching
-  local match
-  match=$(jq -r "keys[] | select(contains(\"$name\"))" "$PORT_REGISTRY" | head -1)
+  # Support partial matching — collect all matches
+  local matches
+  matches=$(jq -r "keys[] | select(contains(\"$name\"))" "$PORT_REGISTRY")
 
-  if [ -z "$match" ]; then
+  if [ -z "$matches" ]; then
     warn "Session '$name' not found in registry"
     tmux kill-session -t "$name" 2>/dev/null && log "Killed tmux session '$name'" || true
     return 0
   fi
 
-  name="$match"
+  local match_count
+  match_count=$(echo "$matches" | wc -l)
+
+  # Exact match — skip selection
+  local exact_match
+  exact_match=$(echo "$matches" | grep -x "$name" || true)
+  if [ -n "$exact_match" ]; then
+    matches="$exact_match"
+    match_count=1
+  fi
+
+  if [ "$match_count" -gt 1 ]; then
+    if [ "$force" = true ]; then
+      # --force with multiple matches: kill all matches
+      while IFS= read -r m; do
+        cmd_kill "kill" "$m" --force
+      done <<< "$matches"
+      return 0
+    fi
+    echo ""
+    echo -e "  ${YELLOW}Multiple sessions match '$name':${NC}"
+    echo ""
+    local i=1
+    local match_array=()
+    while IFS= read -r m; do
+      match_array+=("$m")
+      echo -e "    ${BLUE}$i)${NC} $m"
+      i=$((i + 1))
+    done <<< "$matches"
+    echo -e "    ${BLUE}a)${NC} All of the above"
+    echo ""
+    echo -ne "  ${YELLOW}Select session(s) to kill (e.g. 1, 1 3, a) or 'q' to cancel:${NC} "
+    read -r selection
+
+    [ "$selection" = "q" ] || [ -z "$selection" ] && { echo "  Cancelled."; return 0; }
+
+    local to_kill=()
+    if [ "$selection" = "a" ] || [ "$selection" = "A" ]; then
+      to_kill=("${match_array[@]}")
+    else
+      for sel in $selection; do
+        if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "${#match_array[@]}" ]; then
+          to_kill+=("${match_array[$((sel - 1))]}")
+        else
+          warn "Invalid selection: $sel"
+        fi
+      done
+    fi
+
+    if [ "${#to_kill[@]}" -eq 0 ]; then
+      echo "  No valid sessions selected. Cancelled."
+      return 0
+    fi
+
+    echo ""
+    echo -e "  ${YELLOW}Will kill:${NC}"
+    for s in "${to_kill[@]}"; do
+      echo "    $s"
+    done
+    echo ""
+    echo -ne "  ${YELLOW}Confirm? [y/N]:${NC} "
+    read -r confirm
+    [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || { echo "  Cancelled."; return 0; }
+
+    for s in "${to_kill[@]}"; do
+      cmd_kill "kill" "$s" --force
+    done
+    return 0
+  fi
+
+  # Single match
+  name="$matches"
+
+  if [ "$force" != true ]; then
+    echo ""
+    echo -ne "  ${YELLOW}Kill session '$name'? [y/N]:${NC} "
+    read -r confirm
+    [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || { echo "  Cancelled."; return 0; }
+  fi
+
   local session_owner
   session_owner=$(get_session_field "$name" "owner")
   if [ -n "$session_owner" ] && [ "$session_owner" != "$USER" ]; then
@@ -3966,6 +4050,7 @@ cmd_help() {
     dev kill <session>                      Stop agent + remove worktree + free ports
     dev kill --all                          Kill all sessions
     dev kill --project <name>               Kill all sessions for a project
+    dev kill <session> -f|--force           Skip confirmation prompts
     dev restart <session>                   Restart tmux + agent (keep worktree)
     dev status <session>                    Show detailed session health
     dev send <session> <prompt>             Send text to agent pane
