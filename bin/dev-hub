@@ -285,15 +285,16 @@ render() {
 
       if [ "$compact" = true ]; then
         # Compact: 2-line card layout
-        local short_name
+        local short_name port_display
         short_name=$(echo "$name" | cut -c1-$((w - 6)))
+        [ "$frontend" != "null" ] && [ -n "$frontend" ] && port_display=":${frontend}" || port_display="-"
         if [ "$idx" -eq "$SELECTED" ]; then
           selected_name="$name"
           echo -e "  ${BG_SELECT}${BOLD} $status_icon $short_name${NC}"
-          echo -e "  ${BG_SELECT}   ${DIM}$agent :${frontend} ${age}${NC}${BG_SELECT} ${git_info:-}${NC}"
+          echo -e "  ${BG_SELECT}   ${DIM}$agent ${port_display} ${age}${NC}${BG_SELECT} ${git_info:-}${NC}"
         else
           echo -e "   $status_icon ${BOLD}$short_name${NC}"
-          echo -e "     ${DIM}$agent :${frontend} ${age} ${git_info:-}${NC}"
+          echo -e "     ${DIM}$agent ${port_display} ${age} ${git_info:-}${NC}"
         fi
       else
         # Wide: single-line layout
@@ -305,11 +306,13 @@ render() {
           owner_badge="${DIM}[$owner]${NC} "
         fi
 
+        local port_display
+        [ "$frontend" != "null" ] && [ -n "$frontend" ] && port_display=":${frontend}" || port_display="-"
         if [ "$idx" -eq "$SELECTED" ]; then
           selected_name="$name"
-          echo -e "  ${BG_SELECT}${BOLD} $status_icon $display_name ${owner_badge}${agent}  :${frontend}  ${DIM}${age}${NC}${BG_SELECT} ${git_info:-} ${NC}"
+          echo -e "  ${BG_SELECT}${BOLD} $status_icon $display_name ${owner_badge}${agent}  ${port_display}  ${DIM}${age}${NC}${BG_SELECT} ${git_info:-} ${NC}"
         else
-          echo -e "   $status_icon ${display_name} ${owner_badge}${DIM}${agent}  :${frontend}  ${age} ${git_info:-}${NC}"
+          echo -e "   $status_icon ${display_name} ${owner_badge}${DIM}${agent}  ${port_display}  ${age} ${git_info:-}${NC}"
         fi
       fi
     done <<< "$active_sessions"
@@ -495,8 +498,15 @@ action_url() {
   backend=$(get_session_field "$name" "ports.backend")
 
   echo ""
-  echo -e "  ${CYAN}Frontend:${NC} http://$ip:$frontend"
-  echo -e "  ${CYAN}Backend:${NC}  http://$ip:$backend"
+  if [ "$frontend" != "null" ] && [ -n "$frontend" ]; then
+    echo -e "  ${CYAN}Frontend:${NC} http://$ip:$frontend"
+  fi
+  if [ "$backend" != "null" ] && [ -n "$backend" ]; then
+    echo -e "  ${CYAN}Backend:${NC}  http://$ip:$backend"
+  fi
+  if { [ "$frontend" = "null" ] || [ -z "$frontend" ]; } && { [ "$backend" = "null" ] || [ -z "$backend" ]; }; then
+    echo -e "  ${DIM}No ports allocated for this project.${NC}"
+  fi
   echo ""
   read -rp "  Press Enter to continue..." _
 }
@@ -576,8 +586,12 @@ action_info() {
   echo -e "  Agent(s):   $agent"
   echo -e "  Age:        $age"
   echo -e "  Path:       $path"
-  echo -e "  Frontend:   :$frontend"
-  echo -e "  Backend:    :$backend"
+  if [ "$frontend" != "null" ] && [ -n "$frontend" ]; then
+    echo -e "  Frontend:   :$frontend"
+  fi
+  if [ "$backend" != "null" ] && [ -n "$backend" ]; then
+    echo -e "  Backend:    :$backend"
+  fi
   echo ""
 
   if [ -d "$path" ]; then

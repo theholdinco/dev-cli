@@ -139,11 +139,22 @@ create_tmux_windows() {
     if [ "$win_name" = "agent" ]; then
       resolved_cmd="${env_prefix}${agent_cmd}"
     elif [ "$win_name" = "server" ]; then
-      local port_exports="export DEV_FRONTEND_PORT=$frontend DEV_BACKEND_PORT=$backend DEV_SLOT=${session##*-}"
+      local port_parts=""
+      [ "$frontend" != "null" ] && [ -n "$frontend" ] && port_parts="$port_parts export DEV_FRONTEND_PORT=$frontend"
+      [ "$backend" != "null" ] && [ -n "$backend" ] && port_parts="$port_parts export DEV_BACKEND_PORT=$backend"
+      local port_exports="${port_parts:+${port_parts} }export DEV_SLOT=${session##*-}"
+
+      local url_lines=""
+      [ "$frontend" != "null" ] && [ -n "$frontend" ] && url_lines="Frontend: http://$ip:$frontend"
+      if [ "$backend" != "null" ] && [ -n "$backend" ]; then
+        [ -n "$url_lines" ] && url_lines="$url_lines | Backend: http://$ip:$backend" || url_lines="Backend: http://$ip:$backend"
+      fi
+      [ -z "$url_lines" ] && url_lines="No dev server ports allocated."
+
       if [ -n "$run_cmd" ]; then
-        resolved_cmd="$port_exports && cd $worktree && echo 'Frontend: http://$ip:$frontend | Backend: http://$ip:$backend' && echo 'Running: $run_cmd' && echo '─────────────────────────────────────' && $run_cmd; bash"
+        resolved_cmd="$port_exports && cd $worktree && echo '$url_lines' && echo 'Running: $run_cmd' && echo '─────────────────────────────────────' && $run_cmd; bash"
       else
-        resolved_cmd="$port_exports && cd $worktree && echo 'Frontend: http://$ip:$frontend | Backend: http://$ip:$backend' && echo 'Run your dev server here.' && bash"
+        resolved_cmd="$port_exports && cd $worktree && echo '$url_lines' && echo 'Run your dev server here.' && bash"
       fi
     elif [ -n "$win_command" ]; then
       resolved_cmd="cd $worktree && $win_command"
@@ -215,6 +226,20 @@ register_session() {
   local ports
   ports=$(slot_ports "$slot")
   read -r frontend backend supa_api supa_db supa_studio <<< "$ports"
+
+  # Check project config to determine which ports are needed
+  local config="$CONFIG_DIR/projects/${project}.json"
+  if [ -f "$config" ]; then
+    local has_next has_back has_supa
+    has_next=$(jq -r '.has_nextjs // "n"' "$config")
+    has_back=$(jq -r '.has_backend // "n"' "$config")
+    has_supa=$(jq -r '.has_supabase // "n"' "$config")
+    [[ ! "$has_next" =~ ^[Yy] ]] && frontend="null"
+    [[ ! "$has_back" =~ ^[Yy] ]] && backend="null"
+    if [[ ! "$has_supa" =~ ^[Yy] ]]; then
+      supa_api="null"; supa_db="null"; supa_studio="null"
+    fi
+  fi
 
   # Build agents JSON array from comma-separated agent string (e.g. "claude,codex")
   local agents_json
@@ -927,16 +952,30 @@ cmd_new() {
   ports=$(slot_ports "$slot")
   read -r wt_frontend wt_backend wt_supa_api wt_supa_db wt_supa_studio <<< "$ports"
 
-  # Export port vars so hooks and scripts can use them
+  # Check project config to determine which ports are needed
+  local proj_config="$CONFIG_DIR/projects/${project}.json"
+  if [ -f "$proj_config" ]; then
+    local has_next has_back has_supa
+    has_next=$(jq -r '.has_nextjs // "n"' "$proj_config")
+    has_back=$(jq -r '.has_backend // "n"' "$proj_config")
+    has_supa=$(jq -r '.has_supabase // "n"' "$proj_config")
+    [[ ! "$has_next" =~ ^[Yy] ]] && wt_frontend="null"
+    [[ ! "$has_back" =~ ^[Yy] ]] && wt_backend="null"
+    if [[ ! "$has_supa" =~ ^[Yy] ]]; then
+      wt_supa_api="null"; wt_supa_db="null"; wt_supa_studio="null"
+    fi
+  fi
+
+  # Export port vars so hooks and scripts can use them (only for non-null ports)
   export DEV_SLOT="$slot"
   export DEV_PROJECT="$project"
   export DEV_BRANCH="$branch"
   export DEV_WORKTREE="$worktree_path"
-  export DEV_FRONTEND_PORT="$wt_frontend"
-  export DEV_BACKEND_PORT="$wt_backend"
-  export DEV_SUPA_API_PORT="$wt_supa_api"
-  export DEV_SUPA_DB_PORT="$wt_supa_db"
-  export DEV_SUPA_STUDIO_PORT="$wt_supa_studio"
+  [ "$wt_frontend" != "null" ] && export DEV_FRONTEND_PORT="$wt_frontend"
+  [ "$wt_backend" != "null" ] && export DEV_BACKEND_PORT="$wt_backend"
+  [ "$wt_supa_api" != "null" ] && export DEV_SUPA_API_PORT="$wt_supa_api"
+  [ "$wt_supa_db" != "null" ] && export DEV_SUPA_DB_PORT="$wt_supa_db"
+  [ "$wt_supa_studio" != "null" ] && export DEV_SUPA_STUDIO_PORT="$wt_supa_studio"
   export DEV_IP="$(get_ip)"
 
   # Run project setup hook OR default env generation
@@ -1045,16 +1084,12 @@ cmd_new() {
     done
   fi
 
-  tmux set-environment -t "$name" DEV_FRONTEND_PORT "$wt_frontend"
-  tmux set-environment -t "$name" DEV_BACKEND_PORT "$wt_backend"
-  tmux set-environment -t "$name" DEV_SUPA_API_PORT "$wt_supa_api"
-  tmux set-environment -t "$name" DEV_SUPA_DB_PORT "$wt_supa_db"
-  tmux set-environment -t "$name" DEV_SUPA_STUDIO_PORT "$wt_supa_studio"
+  [ "$wt_frontend" != "null" ] && tmux set-environment -t "$name" DEV_FRONTEND_PORT "$wt_frontend"
+  [ "$wt_backend" != "null" ] && tmux set-environment -t "$name" DEV_BACKEND_PORT "$wt_backend"
+  [ "$wt_supa_api" != "null" ] && tmux set-environment -t "$name" DEV_SUPA_API_PORT "$wt_supa_api"
+  [ "$wt_supa_db" != "null" ] && tmux set-environment -t "$name" DEV_SUPA_DB_PORT "$wt_supa_db"
+  [ "$wt_supa_studio" != "null" ] && tmux set-environment -t "$name" DEV_SUPA_STUDIO_PORT "$wt_supa_studio"
   tmux set-environment -t "$name" DEV_SLOT "$slot"
-
-  local frontend backend
-  frontend="$wt_frontend"
-  backend="$wt_backend"
 
   log "Session '$name' is running!"
   echo ""
@@ -1062,8 +1097,12 @@ cmd_new() {
   echo -e "  ${BOLD}Agent(s):${NC} $agent"
   echo -e "  ${BOLD}Branch:${NC}   $branch"
   echo -e "  ${BOLD}Path:${NC}     $worktree_path"
-  echo -e "  ${BOLD}Frontend:${NC} http://$ip:$frontend"
-  echo -e "  ${BOLD}Backend:${NC}  http://$ip:$backend"
+  if [ "$wt_frontend" != "null" ]; then
+    echo -e "  ${BOLD}Frontend:${NC} http://$ip:$wt_frontend"
+  fi
+  if [ "$wt_backend" != "null" ]; then
+    echo -e "  ${BOLD}Backend:${NC}  http://$ip:$wt_backend"
+  fi
   echo ""
   echo -e "  ${DIM}Attach:    dev attach $name${NC}"
   local win_names
@@ -1140,8 +1179,11 @@ cmd_ls() {
       local branch_display
       branch_display=$(echo "$branch" | cut -c1-20)
 
+      local port_display
+      [ "$frontend" != "null" ] && [ -n "$frontend" ] && port_display=":$frontend" || port_display="-"
+
       echo -e "  $status_icon ${BOLD}$name${NC} ${DIM}($status_word)${NC}"
-      echo -e "    ${DIM}$agent · :$frontend · $age · $branch_display${NC}"
+      echo -e "    ${DIM}$agent · $port_display · $age · $branch_display${NC}"
     done <<< "$sessions"
   else
     # Full table for wide terminals
@@ -1173,8 +1215,12 @@ cmd_ls() {
       local branch_display
       branch_display=$(echo "$branch" | cut -c1-10)
 
+      local front_display back_display
+      [ "$frontend" != "null" ] && [ -n "$frontend" ] && front_display=":$frontend" || front_display="-"
+      [ "$backend" != "null" ] && [ -n "$backend" ] && back_display=":$backend" || back_display="-"
+
       printf "  %-30s %-10s %-14s %-8s %-8s %-10s %-6s " \
-        "$name" "$owner" "$agent" ":$frontend" ":$backend" "$branch_display" "$age"
+        "$name" "$owner" "$agent" "$front_display" "$back_display" "$branch_display" "$age"
       echo -e "$status"
     done <<< "$sessions"
   fi
@@ -1455,13 +1501,16 @@ cmd_ports() {
     printf "  ${DIM}%-4s %-20s %-8s %-8s${NC}\n" \
       "────" "────────────────────" "────────" "────────"
     while IFS=$'\t' read -r slot session_name; do
-      local ports
-      ports=$(slot_ports "$slot")
-      read -r frontend backend _supa_api _supa_db _supa_studio <<< "$ports"
+      local frontend backend
+      frontend=$(get_session_field "$session_name" "ports.frontend")
+      backend=$(get_session_field "$session_name" "ports.backend")
+      local front_display back_display
+      [ "$frontend" != "null" ] && [ -n "$frontend" ] && front_display=":$frontend" || front_display="-"
+      [ "$backend" != "null" ] && [ -n "$backend" ] && back_display=":$backend" || back_display="-"
       local short_name
       short_name=$(echo "$session_name" | cut -c1-20)
       printf "  ${GREEN}%-4s${NC} %-20s %-8s %-8s\n" \
-        "$slot" "$short_name" ":$frontend" ":$backend"
+        "$slot" "$short_name" "$front_display" "$back_display"
     done <<< "$active_slots"
   else
     # Full table
@@ -1470,11 +1519,20 @@ cmd_ports() {
     printf "  ${DIM}%-5s %-30s %-10s %-10s %-10s %-10s %-10s${NC}\n" \
       "─────" "──────────────────────────────" "──────────" "──────────" "──────────" "──────────" "──────────"
     while IFS=$'\t' read -r slot session_name; do
-      local ports
-      ports=$(slot_ports "$slot")
-      read -r frontend backend supa_api supa_db supa_studio <<< "$ports"
+      local frontend backend supa_api supa_db supa_studio
+      frontend=$(get_session_field "$session_name" "ports.frontend")
+      backend=$(get_session_field "$session_name" "ports.backend")
+      supa_api=$(get_session_field "$session_name" "ports.supa_api")
+      supa_db=$(get_session_field "$session_name" "ports.supa_db")
+      supa_studio=$(get_session_field "$session_name" "ports.supa_studio")
+      local fd bd sad sdd sud
+      [ "$frontend" != "null" ] && [ -n "$frontend" ] && fd=":$frontend" || fd="-"
+      [ "$backend" != "null" ] && [ -n "$backend" ] && bd=":$backend" || bd="-"
+      [ "$supa_api" != "null" ] && [ -n "$supa_api" ] && sad=":$supa_api" || sad="-"
+      [ "$supa_db" != "null" ] && [ -n "$supa_db" ] && sdd=":$supa_db" || sdd="-"
+      [ "$supa_studio" != "null" ] && [ -n "$supa_studio" ] && sud=":$supa_studio" || sud="-"
       printf "  ${GREEN}%-5s${NC} %-30s %-10s %-10s %-10s %-10s %-10s\n" \
-        "$slot" "$session_name" ":$frontend" ":$backend" ":$supa_api" ":$supa_db" ":$supa_studio"
+        "$slot" "$session_name" "$fd" "$bd" "$sad" "$sdd" "$sud"
     done <<< "$active_slots"
   fi
   echo ""
@@ -1508,8 +1566,15 @@ cmd_url() {
 
   echo ""
   echo -e "  ${BOLD}$match${NC}"
-  echo -e "  Frontend: ${CYAN}http://$ip:$frontend${NC}"
-  echo -e "  Backend:  ${CYAN}http://$ip:$backend${NC}"
+  if [ "$frontend" != "null" ] && [ -n "$frontend" ]; then
+    echo -e "  Frontend: ${CYAN}http://$ip:$frontend${NC}"
+  fi
+  if [ "$backend" != "null" ] && [ -n "$backend" ]; then
+    echo -e "  Backend:  ${CYAN}http://$ip:$backend${NC}"
+  fi
+  if { [ "$frontend" = "null" ] || [ -z "$frontend" ]; } && { [ "$backend" = "null" ] || [ -z "$backend" ]; }; then
+    echo -e "  ${DIM}No ports allocated for this project.${NC}"
+  fi
   echo ""
 }
 
@@ -1897,15 +1962,23 @@ cmd_status() {
 
   # Port checks
   echo -e "  ${BOLD}Ports${NC}"
+  local has_ports=false
   for port_info in "Frontend:$frontend" "Backend:$backend"; do
     local label="${port_info%%:*}"
     local port="${port_info##*:}"
+    if [ "$port" = "null" ] || [ -z "$port" ]; then
+      continue
+    fi
+    has_ports=true
     if bash -c "echo >/dev/tcp/localhost/$port" 2>/dev/null; then
       echo -e "  $label:  :$port ${GREEN}listening${NC}"
     else
       echo -e "  $label:  :$port ${DIM}closed${NC}"
     fi
   done
+  if [ "$has_ports" = false ]; then
+    echo -e "  ${DIM}No ports allocated for this project.${NC}"
+  fi
   echo ""
 }
 
@@ -2276,11 +2349,11 @@ cmd_restart() {
     done
   fi
 
-  tmux set-environment -t "$match" DEV_FRONTEND_PORT "$frontend"
-  tmux set-environment -t "$match" DEV_BACKEND_PORT "$backend"
-  tmux set-environment -t "$match" DEV_SUPA_API_PORT "$supa_api"
-  tmux set-environment -t "$match" DEV_SUPA_DB_PORT "$supa_db"
-  tmux set-environment -t "$match" DEV_SUPA_STUDIO_PORT "$supa_studio"
+  [ "$frontend" != "null" ] && [ -n "$frontend" ] && tmux set-environment -t "$match" DEV_FRONTEND_PORT "$frontend"
+  [ "$backend" != "null" ] && [ -n "$backend" ] && tmux set-environment -t "$match" DEV_BACKEND_PORT "$backend"
+  [ "$supa_api" != "null" ] && [ -n "$supa_api" ] && tmux set-environment -t "$match" DEV_SUPA_API_PORT "$supa_api"
+  [ "$supa_db" != "null" ] && [ -n "$supa_db" ] && tmux set-environment -t "$match" DEV_SUPA_DB_PORT "$supa_db"
+  [ "$supa_studio" != "null" ] && [ -n "$supa_studio" ] && tmux set-environment -t "$match" DEV_SUPA_STUDIO_PORT "$supa_studio"
   tmux set-environment -t "$match" DEV_SLOT "$slot"
 
   log "Session '$match' restarted with $agents"
