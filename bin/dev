@@ -3644,6 +3644,100 @@ cmd_task() {
   esac
 }
 
+cmd_ask() {
+  local project="${2:-}" prompt="" agent="claude"
+  shift 2 || true
+
+  # Parse options
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --agent) agent="${2:-claude}"; shift 2 ;;
+      --agent=*) agent="${1#*=}"; shift ;;
+      *)
+        # Collect remaining args as the prompt
+        if [ -z "$prompt" ]; then
+          prompt="$1"
+        else
+          prompt="$prompt $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [ -z "$project" ] && die "Usage: dev ask <project> [prompt] [--agent claude|codex]"
+
+  local bare_dir="$PROJECTS_DIR/$project"
+  [ -d "$bare_dir" ] || die "Project '$project' not found. Run 'dev setup $project <url>' first."
+
+  # Create a temporary worktree from the main branch
+  local base_branch
+  cd "$bare_dir"
+  base_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo "main")
+
+  local tmp_name="ask-$$-$(date +%s)"
+  local wt_dir="$PROJECTS_DIR/${project}-worktrees"
+  local tmp_path="$wt_dir/.tmp-$tmp_name"
+
+  mkdir -p "$wt_dir"
+  info "Creating temporary worktree from $base_branch..."
+  git fetch origin --prune 2>/dev/null || true
+  git worktree add "$tmp_path" "origin/$base_branch" --detach 2>/dev/null \
+    || die "Failed to create temporary worktree"
+
+  # Cleanup function to remove the temporary worktree on exit
+  cleanup_ask() {
+    echo ""
+    info "Cleaning up temporary worktree..."
+    cd "$bare_dir" 2>/dev/null
+    git worktree remove "$tmp_path" --force 2>/dev/null || true
+    log "Temporary worktree removed"
+  }
+  trap cleanup_ask EXIT
+
+  log "Temporary worktree ready"
+  echo ""
+
+  # Source secrets if available
+  local env_prefix=""
+  if [ -f "$SECRETS_FILE" ]; then
+    env_prefix="source $SECRETS_FILE && "
+  fi
+
+  # Launch the agent directly (not in tmux)
+  cd "$tmp_path"
+
+  case "$agent" in
+    claude)
+      if [ -n "$prompt" ]; then
+        info "Asking Claude: $prompt"
+        echo ""
+        eval "${env_prefix}claude --print \"$prompt\""
+      else
+        info "Starting Claude in $project (read-only, no worktree session)"
+        echo -e "  ${DIM}This is a temporary checkout — changes won't be saved.${NC}"
+        echo ""
+        eval "${env_prefix}claude"
+      fi
+      ;;
+    codex)
+      if [ -n "$prompt" ]; then
+        info "Asking Codex: $prompt"
+        echo ""
+        eval "${env_prefix}codex --prompt \"$prompt\""
+      else
+        info "Starting Codex in $project (read-only, no worktree session)"
+        echo -e "  ${DIM}This is a temporary checkout — changes won't be saved.${NC}"
+        echo ""
+        eval "${env_prefix}codex"
+      fi
+      ;;
+    *)
+      die "Unknown agent: $agent. Use claude or codex."
+      ;;
+  esac
+}
+
 cmd_help() {
   cat << 'HELPEOF'
 
@@ -3675,6 +3769,9 @@ cmd_help() {
     dev diff <session>                      Show git diff --stat for session
     dev diff <session> --full               Show full git diff
     dev sync <session>                      Rebase session on upstream base branch
+    dev ask <project> [prompt]              Ask AI about the code without creating a session
+                                            --agent claude|codex (default: claude)
+                                            Runs interactively if no prompt given
     dev hub                                 Interactive TUI control center
     dev dashboard                           Split-pane view of all agents (read-only)
 
@@ -3776,6 +3873,8 @@ cmd_help() {
     dev new klyra feat/trading-ui --agent claude
     dev new klyra feat/trading-ui --yolo
     dev new klyra fix/auth-bug --agents claude,codex
+    dev ask klyra "how does the auth flow work?"
+    dev ask klyra                                # interactive session
     dev agent add klyra-feat-trading-ui codex
     dev ls
     dev attach klyra-feat-trading-ui
@@ -3831,6 +3930,7 @@ case "${1:-help}" in
   services)  cmd_services "$@" ;;
   task)      cmd_task "$@" ;;
   notify)    cmd_notify "$@" ;;
+  ask)       cmd_ask "$@" ;;
   mobile|m)  cmd_mobile ;;
   help|-h|--help) cmd_help ;;
   *)         die "Unknown command: $1. Run 'dev help' for usage." ;;
