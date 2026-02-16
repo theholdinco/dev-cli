@@ -258,13 +258,19 @@ _dev() {
 
   # task subcommands
   if [ "$cmd" = "task" ] && [ "$COMP_CWORD" -eq 2 ]; then
-    COMPREPLY=( $(compgen -W "add ls rm run watch log" -- "$cur") )
+    COMPREPLY=( $(compgen -W "add ls rm prune run watch log" -- "$cur") )
     return 0
   fi
 
   # task ls filter flags
   if [ "$cmd" = "task" ] && [ "${COMP_WORDS[2]:-}" = "ls" ] && [ "$COMP_CWORD" -ge 3 ]; then
     COMPREPLY=( $(compgen -W "--all --pending --running --done --failed --pr-created" -- "$cur") )
+    return 0
+  fi
+
+  # task prune flags
+  if [ "$cmd" = "task" ] && [ "${COMP_WORDS[2]:-}" = "prune" ] && [ "$COMP_CWORD" -ge 3 ]; then
+    COMPREPLY=( $(compgen -W "--failed --all-finished --dry-run" -- "$cur") )
     return 0
   fi
 

@@ -3675,6 +3675,64 @@ cmd_task() {
       done
       echo ""
       ;;
+    prune)
+      # Parse flags
+      local prune_filter="done"
+      local dry_run=false
+      local i=3
+      while [ $i -le $# ]; do
+        local arg="${!i}"
+        case "$arg" in
+          --failed)       prune_filter="failed" ;;
+          --all-finished) prune_filter="all-finished" ;;
+          --dry-run)      dry_run=true ;;
+          *) warn "Unknown flag: $arg" ;;
+        esac
+        i=$((i + 1))
+      done
+
+      # Build jq select expression for tasks to prune
+      local select_expr
+      case "$prune_filter" in
+        done)         select_expr='select(.status == "done")' ;;
+        failed)       select_expr='select(.status == "failed")' ;;
+        all-finished) select_expr='select(.status == "done" or .status == "failed" or .status == "pr-created")' ;;
+      esac
+
+      local count
+      count=$(jq "[.tasks[] | ${select_expr}] | length" "$TASK_REGISTRY")
+
+      if [ "$count" -eq 0 ]; then
+        info "No tasks to prune (filter: ${prune_filter})."
+        return
+      fi
+
+      if [ "$dry_run" = true ]; then
+        echo ""
+        echo -e "  ${DIM}Would prune $count task(s):${NC}"
+        echo ""
+        printf "  ${BOLD}%-4s %-12s %-20s %-25s %s${NC}\n" "ID" "STATUS" "PROJECT" "BRANCH" "DESCRIPTION"
+        echo "  ─────────────────────────────────────────────────────────────────────────────────"
+        jq -r ".tasks[] | ${select_expr} | [.id, .status, .project, .branch, .description] | @tsv" "$TASK_REGISTRY" | \
+        while IFS=$'\t' read -r id status project branch desc; do
+          printf "  %-4s %-12s %-20s %-25s %s\n" "$id" "$status" "$project" "$branch" "$desc"
+        done
+        echo ""
+        return
+      fi
+
+      local tmp="$TASK_REGISTRY.tmp.$$"
+      jq ".tasks = [.tasks[] | ${select_expr} | not // empty] // []" "$TASK_REGISTRY" > /dev/null 2>&1 || true
+      # Use the inverse select to keep non-matching tasks
+      local keep_expr
+      case "$prune_filter" in
+        done)         keep_expr='select(.status != "done")' ;;
+        failed)       keep_expr='select(.status != "failed")' ;;
+        all-finished) keep_expr='select(.status != "done" and .status != "failed" and .status != "pr-created")' ;;
+      esac
+      jq ".tasks = [.tasks[] | ${keep_expr}]" "$TASK_REGISTRY" > "$tmp" && mv "$tmp" "$TASK_REGISTRY"
+      log "Pruned $count task(s) (filter: ${prune_filter})"
+      ;;
     rm|remove)
       local id="${3:-}"
       [ -n "$id" ] || die "Usage: dev task rm <id>"
@@ -3709,11 +3767,13 @@ cmd_task() {
       fi
       ;;
     *)
-      echo "Usage: dev task <add|ls|rm|run|watch|log>"
+      echo "Usage: dev task <add|ls|rm|prune|run|watch|log>"
       echo ""
       echo "  add <project> <branch> \"desc\"  Add a task to the queue"
       echo "  ls [--pending|--running|...]    List tasks (filter by status)"
       echo "  rm <id>                        Remove a task"
+      echo "  prune [--failed|--all-finished] [--dry-run]"
+      echo "                                 Remove completed tasks (default: done only)"
       echo "  run                            Run task runner (single pass)"
       echo "  watch                          Run task runner (watch mode)"
       echo "  log                            Tail the runner log"
@@ -3983,6 +4043,8 @@ cmd_help() {
     dev task ls [--pending|--running|--done|--failed|--pr-created|--all]
                                             List tasks (filterable by status)
     dev task rm <id>                        Remove a task
+    dev task prune [--failed|--all-finished] [--dry-run]
+                                            Remove completed tasks
     dev task run                            Run task runner (single pass)
     dev task watch                          Run task runner (watch mode)
     dev task log                            Tail the runner log
