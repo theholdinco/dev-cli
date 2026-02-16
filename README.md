@@ -1,6 +1,6 @@
 # dev-cli
 
-Multi-agent development environment manager. Run multiple Claude Code and Codex instances on a remote VPS with isolated git worktrees, automatic port allocation, and a TUI control center.
+A bash-based CLI tool for managing multiple AI coding agent instances (Claude Code, Codex) on a remote VPS. Provides isolated git worktrees, automatic port allocation, tmux session management, and an interactive TUI control center.
 
 ## Architecture
 
@@ -231,3 +231,11 @@ All other dependencies are installed by `bootstrap.sh`.
 | `Ctrl+a \|` | Split vertically |
 | `Ctrl+a -` | Split horizontally |
 | `Alt+↑↓←→` | Move between panes |
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feat/my-feature`)
+3. Verify syntax after changes: `bash -n bin/dev && bash -n bin/dev-hub`
+4. Test locally with `./install.sh`
+5. Submit a pull request
