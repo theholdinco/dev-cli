@@ -139,10 +139,24 @@ SECRETS
   log "Created $CONFIG_DIR/secrets.env"
 fi
 
-# Create empty port registry if it doesn't exist
-if [ ! -f "$CONFIG_DIR/ports.json" ]; then
+# Migrate local port registry to global if available
+GLOBAL_PORT_REGISTRY="/etc/dev-cli/ports.json"
+if [ -f "$GLOBAL_PORT_REGISTRY" ] && [ -w "$GLOBAL_PORT_REGISTRY" ]; then
+  LOCAL_PORTS="$CONFIG_DIR/ports.json"
+  if [ -f "$LOCAL_PORTS" ] && [ "$(jq 'length' "$LOCAL_PORTS" 2>/dev/null)" -gt 0 ]; then
+    info "Migrating local port registry to global..."
+    local_tmp=$(mktemp)
+    (
+      flock -x 200
+      jq -s '.[0] * .[1]' "$GLOBAL_PORT_REGISTRY" "$LOCAL_PORTS" > "$local_tmp"
+      mv "$local_tmp" "$GLOBAL_PORT_REGISTRY"
+    ) 200>"${GLOBAL_PORT_REGISTRY}.lock"
+    mv "$LOCAL_PORTS" "${LOCAL_PORTS}.migrated"
+    log "Migrated local sessions to global registry (local backed up as ports.json.migrated)"
+  fi
+elif [ ! -f "$CONFIG_DIR/ports.json" ]; then
   echo '{}' > "$CONFIG_DIR/ports.json"
-  log "Created port registry"
+  log "Created local port registry"
 fi
 
 # Generate tab completion
@@ -177,7 +191,9 @@ _dev() {
   # Session name completion
   if echo " $session_cmds " | grep -q " $cmd "; then
     local sessions
-    sessions=$(jq -r 'keys[]' "$HOME/.config/dev-cli/ports.json" 2>/dev/null)
+    local port_file="/etc/dev-cli/ports.json"
+    [ -r "$port_file" ] || port_file="$HOME/.config/dev-cli/ports.json"
+    sessions=$(jq -r 'keys[]' "$port_file" 2>/dev/null)
     if [ -n "$sessions" ]; then
       COMPREPLY=( $(compgen -W "$sessions" -- "$cur") )
     fi
