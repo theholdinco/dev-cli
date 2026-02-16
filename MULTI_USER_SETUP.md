@@ -1,87 +1,91 @@
-# Multi-User Setup Guide
+# Adding a New User
 
-## Pre-requisites (one-time, as your admin user)
+## Admin side
 
-### 1. Create shared infrastructure
-
-```bash
-sudo groupadd -f devs
-sudo usermod -aG devs $USER
-sudo mkdir -p /etc/dev-cli
-sudo chown :devs /etc/dev-cli
-sudo chmod g+ws /etc/dev-cli
-echo '{}' | sudo tee /etc/dev-cli/ports.json > /dev/null
-sudo chown :devs /etc/dev-cli/ports.json
-sudo chmod g+w /etc/dev-cli/ports.json
-```
-
-> After adding yourself to `devs`, you need to re-login or run `newgrp devs` for it to take effect.
-
-### 2. Re-install dev-cli
+### 1. Create the user
 
 ```bash
-./install.sh
+sudo add-dev-user <username>
 ```
 
-This will migrate any existing sessions from `~/.config/dev-cli/ports.json` into the global registry and rename the local file to `ports.json.migrated`.
+This creates the Linux user, installs dev-cli and Claude Code, sets up groups and PATH. Note the temporary password printed at the end.
 
-### 3. Verify your sessions still work
+### 2. Share credentials
+
+Send the new user:
+- Temporary password (they'll be forced to change it on first login)
+- Server hostname: `ssh <username>@patagon`
+
+### 3. Verify (optional)
+
+After they log in, check the shared registry:
 
 ```bash
-dev ls          # should show your sessions (now user-prefixed)
-dev ports       # should read from /etc/dev-cli/ports.json
+cat /etc/dev-cli/ports.json   # their sessions should appear here
 ```
 
-> **Note:** Existing tmux sessions still use old names (without user prefix). You may need to `dev kill --all` and recreate them, or manually rename them.
+---
 
-## Adding a test user
+## User side
+
+### 1. First login
 
 ```bash
-sudo add-dev-user testuser
+ssh <username>@patagon
 ```
 
-This will print a temporary password. The user must change it on first SSH login.
+You'll be prompted to change your password immediately.
 
-### Test as the new user
+### 2. Authenticate services
 
 ```bash
-# From your admin session:
-sudo su - testuser
-
-# Or SSH in:
-ssh testuser@localhost
-
-# As testuser, verify:
-dev doctor        # check dependencies
-dev ls            # should see global sessions (empty for new user)
-claude --version  # Claude Code should be installed
+gh auth login       # GitHub — follow the prompts
+claude login        # Claude Code — opens browser auth
 ```
 
-### Test session isolation
+### 3. Verify setup
 
 ```bash
-# As testuser:
-dev new <project> main    # creates testuser-<project>-main
-
-# As your admin user (in another terminal):
-dev ls                    # should show both users' sessions
-dev ls --mine             # should show only your sessions (if implemented)
+dev doctor          # all tools should be green
 ```
 
-Check `/etc/dev-cli/ports.json` — both users' sessions should be there with different slots and no port conflicts.
+### 4. Fix ports.json (if needed)
 
-## Cleanup
+If `dev doctor` shows "ports.json — invalid JSON!", run:
 
 ```bash
-# Kill test sessions
-sudo su - testuser -c "dev kill --all"
-
-# Remove test user
-sudo userdel -r testuser
+echo '{}' > ~/.config/dev-cli/ports.json
 ```
+
+### 5. Start working
+
+```bash
+dev init <project>              # set up a project (first time only)
+dev new <project> <branch>      # create a session
+dev ls                          # list your sessions
+```
+
+---
+
+## Tips
+
+- **SSH keys**: Set up key-based auth to skip password entry: `ssh-copy-id <username>@patagon`
+- **tmux**: Sessions persist after disconnect. Reconnect with `dev attach <session>`
+- **Shell customization**: Users can edit their own `~/.bashrc` freely — Homebrew and nvm are already sourced
+- **Shared secrets**: API keys and env files are symlinked from `/etc/dev-cli/secrets/` into each user's config automatically
 
 ## Troubleshooting
 
-- **"Permission denied" on ports.json** — User isn't in `devs` group. Run `sudo usermod -aG devs <user>` and have them re-login.
-- **Old sessions not found** — Session names now include `$USER` prefix. Kill old sessions and recreate.
-- **flock errors** — The lock file (`ports.json.lock`) needs to be writable in the same dir. If `/etc/dev-cli` has `g+ws`, this should work automatically.
+| Problem | Fix |
+|---|---|
+| "Permission denied" on ports.json | User isn't in `devs` group. Run `sudo usermod -aG devs <user>`, then they re-login |
+| `claude: command not found` | Re-run: `sudo su - <user> -c 'curl -fsSL https://claude.ai/install.sh \| bash'` |
+| `dev: command not found` | Re-run: `sudo su - <user> -c "bash /opt/dev-cli/install.sh"` |
+| flock errors on ports.json | Ensure `/etc/dev-cli` has group write: `sudo chmod g+ws /etc/dev-cli` |
+
+## Removing a user
+
+```bash
+sudo su - <username> -c "dev kill --all"   # clean up their sessions
+sudo userdel -r <username>                 # remove user and home dir
+```
