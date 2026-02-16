@@ -2,6 +2,7 @@
 
 import re
 from core.sessions import SessionInfo, get_ip
+from core.tasks import TaskInfo
 
 
 TELEGRAM_MAX_LENGTH = 4096
@@ -144,3 +145,56 @@ def truncate(text: str, max_length: int = TELEGRAM_MAX_LENGTH) -> str:
         return text
     suffix = "\n... (truncated)"
     return text[: max_length - len(suffix)] + suffix
+
+
+# ── Task formatting ──────────────────────────────────────────────────────────
+
+def _task_status_emoji(status: str) -> str:
+    """Return a status emoji for a task."""
+    return {
+        "pending": "\U0001f7e1",   # yellow circle
+        "running": "\U0001f535",   # blue circle
+        "done": "\U0001f7e2",     # green circle
+        "failed": "\U0001f534",   # red circle
+    }.get(status, "\u26aa")       # white circle
+
+
+def format_task(task: TaskInfo) -> str:
+    """Format a TaskInfo into a detailed Telegram message."""
+    status = _task_status_emoji(task.status)
+
+    lines = [
+        f"{status} {bold(f'Task #{task.id}')}",
+        "",
+        f"\U0001f4c1 Project: {mono(task.project)}",
+        f"\U0001f33f Branch: {mono(task.branch)}",
+        f"\U0001f4dd Status: {escape_md(task.status)}",
+        f"\U0001f4ac {escape_md(task.description)}",
+    ]
+
+    if task.session:
+        lines.append(f"\U0001f4bb Session: {mono(task.session)}")
+
+    if task.pr_url:
+        lines.append(f"\U0001f517 PR: {escape_md(task.pr_url)}")
+
+    if task.created:
+        lines.append(f"\u23f1 Created: {escape_md(task.created[:16].replace('T', ' '))}")
+
+    return "\n".join(lines)
+
+
+def format_task_list(tasks: list[TaskInfo]) -> str:
+    """Format a list of tasks into a compact Telegram message."""
+    if not tasks:
+        return escape_md("No tasks in the queue.")
+
+    lines = [bold(f"Tasks ({len(tasks)})"), ""]
+
+    for t in tasks:
+        status = _task_status_emoji(t.status)
+        desc = t.description[:40] + "..." if len(t.description) > 40 else t.description
+        line = f"{status} {mono(f'#{t.id}')} {escape_md(t.project)}/{escape_md(t.branch)} \\- {escape_md(desc)}"
+        lines.append(line)
+
+    return "\n".join(lines)

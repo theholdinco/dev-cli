@@ -27,6 +27,7 @@ from bot.handlers.sessions import (
 from bot.handlers.agents import cmd_agent_add, cmd_agent_remove, cmd_agent_list
 from bot.handlers.commands import cmd_send, cmd_diff, cmd_logs, cmd_pr, cmd_sync
 from bot.handlers.system import cmd_stats, cmd_ports, cmd_doctor, cmd_url, cmd_gc
+from bot.handlers.tasks import cmd_tasks, cmd_task_add, cmd_task_rm, cmd_task_run
 
 
 def get_bot_token() -> str:
@@ -80,6 +81,12 @@ def main():
     app.add_handler(CommandHandler("doctor", cmd_doctor))
     app.add_handler(CommandHandler("url", cmd_url))
     app.add_handler(CommandHandler("gc", cmd_gc))
+
+    # Tasks
+    app.add_handler(CommandHandler("tasks", cmd_tasks))
+    app.add_handler(CommandHandler("task_add", cmd_task_add))
+    app.add_handler(CommandHandler("task_rm", cmd_task_rm))
+    app.add_handler(CommandHandler("task_run", cmd_task_run))
 
     # Inline keyboard callbacks (kill confirmation)
     app.add_handler(CallbackQueryHandler(callback_kill, pattern=r"^kill_"))

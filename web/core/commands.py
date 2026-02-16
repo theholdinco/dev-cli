@@ -122,3 +122,18 @@ def run_gc() -> CommandResult:
 def run_doctor() -> CommandResult:
     """Run diagnostics: dev doctor."""
     return run_dev(["doctor"])
+
+
+def task_add(project: str, branch: str, description: str) -> CommandResult:
+    """Add a task: dev task add <project> <branch> <description>."""
+    return run_dev(["task", "add", project, branch, description])
+
+
+def task_remove(task_id: str) -> CommandResult:
+    """Remove a task: dev task rm <id>."""
+    return run_dev(["task", "rm", task_id])
+
+
+def task_run() -> CommandResult:
+    """Run task runner single pass: dev task run."""
+    return run_dev(["task", "run"], timeout=300)

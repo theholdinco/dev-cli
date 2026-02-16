@@ -16,6 +16,7 @@ CONFIG_DIR="$HOME/.config/dev-cli"
 GLOBAL_PORT_REGISTRY="/etc/dev-cli/ports.json"
 PORT_REGISTRY="$GLOBAL_PORT_REGISTRY"
 SECRETS_FILE="$CONFIG_DIR/secrets.env"
+TASK_REGISTRY="$CONFIG_DIR/tasks.json"
 LOG_DIR="$CONFIG_DIR/logs"
 WEB_DIR="$HOME/.local/share/dev-cli/web"
 
@@ -93,6 +94,7 @@ ensure_dirs() {
     [ -f "$PORT_REGISTRY" ] || echo '{}' > "$PORT_REGISTRY"
   fi
   [ -f "$GLOBAL_CONFIG" ] || echo "$DEFAULT_CONFIG" > "$GLOBAL_CONFIG"
+  [ -f "$TASK_REGISTRY" ] || echo '{"tasks":[],"next_id":1}' > "$TASK_REGISTRY"
 }
 
 # Read a config value with jq path, falling back to default config, then to a provided default
@@ -3349,6 +3351,24 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+
+    sudo tee "$service_dir/dev-task-runner.service" > /dev/null << EOF
+[Unit]
+Description=dev-cli Task Runner
+After=network.target
+
+[Service]
+Type=exec
+User=$run_user
+Environment=HOME=$run_home
+Environment=PATH=$run_home/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=$run_home/.local/bin/dev-task-runner --watch
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
   }
 
   case "$subcmd" in
@@ -3390,14 +3410,18 @@ EOF
         info "Telegram bot not enabled (no bot_token configured)"
         info "Set telegram.bot_token in config, then run: dev services install"
       fi
+      sudo systemctl enable dev-task-runner.service
+      log "dev-task-runner service installed and enabled"
       info "Services will auto-start on boot. Start now with: dev services start"
       ;;
     uninstall)
       sudo systemctl stop dev-web.service 2>/dev/null || true
       sudo systemctl stop dev-bot.service 2>/dev/null || true
+      sudo systemctl stop dev-task-runner.service 2>/dev/null || true
       sudo systemctl disable dev-web.service 2>/dev/null || true
       sudo systemctl disable dev-bot.service 2>/dev/null || true
-      sudo rm -f "$service_dir/dev-web.service" "$service_dir/dev-bot.service"
+      sudo systemctl disable dev-task-runner.service 2>/dev/null || true
+      sudo rm -f "$service_dir/dev-web.service" "$service_dir/dev-bot.service" "$service_dir/dev-task-runner.service"
       sudo systemctl daemon-reload
       log "Services uninstalled"
       ;;
@@ -3410,10 +3434,13 @@ EOF
         sudo systemctl start dev-bot.service
         log "Telegram bot started"
       fi
+      sudo systemctl start dev-task-runner.service
+      log "Task runner started"
       ;;
     stop)
       sudo systemctl stop dev-web.service 2>/dev/null && log "Web dashboard stopped" || true
       sudo systemctl stop dev-bot.service 2>/dev/null && log "Telegram bot stopped" || true
+      sudo systemctl stop dev-task-runner.service 2>/dev/null && log "Task runner stopped" || true
       ;;
     restart)
       sudo systemctl restart dev-web.service
@@ -3424,6 +3451,8 @@ EOF
         sudo systemctl restart dev-bot.service
         log "Telegram bot restarted"
       fi
+      sudo systemctl restart dev-task-runner.service
+      log "Task runner restarted"
       ;;
     status)
       echo -e "${BOLD}Services:${NC}"
@@ -3442,6 +3471,11 @@ EOF
       else
         echo -e "  ${RED}●${NC} Telegram bot"
       fi
+      if systemctl is-active dev-task-runner.service &>/dev/null; then
+        echo -e "  ${GREEN}●${NC} Task runner"
+      else
+        echo -e "  ${RED}●${NC} Task runner"
+      fi
       echo ""
       if [ -f "$service_dir/dev-web.service" ]; then
         echo -e "  Installed: ${GREEN}yes${NC} (auto-start on boot)"
@@ -3454,7 +3488,8 @@ EOF
       case "$service" in
         web) journalctl -u dev-web.service -f --no-hostname ;;
         bot) journalctl -u dev-bot.service -f --no-hostname ;;
-        *)   die "Unknown service: $service. Use 'web' or 'bot'" ;;
+        task-runner) journalctl -u dev-task-runner.service -f --no-hostname ;;
+        *)   die "Unknown service: $service. Use 'web', 'bot', or 'task-runner'" ;;
       esac
       ;;
     *)
@@ -3492,6 +3527,111 @@ cmd_mobile() {
     5) cmd_stats ;;
     6) cmd_hub ;;
     *) echo -e "  ${DIM}Invalid choice.${NC}" ;;
+  esac
+}
+
+cmd_task() {
+  local subcmd="${2:-ls}"
+
+  case "$subcmd" in
+    add)
+      local project="${3:-}"
+      local branch="${4:-}"
+      local description="${5:-}"
+      [ -n "$project" ] || die "Usage: dev task add <project> <branch> \"description\""
+      [ -n "$branch" ] || die "Usage: dev task add <project> <branch> \"description\""
+      [ -n "$description" ] || die "Usage: dev task add <project> <branch> \"description\""
+
+      # Validate project exists
+      [ -d "$CONFIG_DIR/projects" ] && [ -f "$CONFIG_DIR/projects/${project}.json" ] \
+        || die "Project '$project' not found. Run 'dev init' first."
+
+      local id now tmp
+      id=$(jq -r '.next_id' "$TASK_REGISTRY")
+      now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+      tmp="$TASK_REGISTRY.tmp.$$"
+
+      jq --arg id "$id" --arg proj "$project" --arg br "$branch" \
+         --arg desc "$description" --arg now "$now" \
+        '.tasks += [{
+          id: $id,
+          project: $proj,
+          branch: $br,
+          description: $desc,
+          status: "pending",
+          session: null,
+          pr_url: null,
+          created: $now,
+          started: null,
+          completed: null
+        }] | .next_id = (.next_id + 1)' "$TASK_REGISTRY" > "$tmp" && mv "$tmp" "$TASK_REGISTRY"
+
+      log "Task #$id added: $project/$branch — $description"
+      ;;
+    ls|list)
+      if ! jq -e '.tasks | length > 0' "$TASK_REGISTRY" &>/dev/null; then
+        info "No tasks. Add one with: dev task add <project> <branch> \"description\""
+        return
+      fi
+      echo ""
+      printf "  ${BOLD}%-4s %-10s %-20s %-25s %s${NC}\n" "ID" "STATUS" "PROJECT" "BRANCH" "DESCRIPTION"
+      echo "  ─────────────────────────────────────────────────────────────────────────────"
+      jq -r '.tasks[] | [.id, .status, .project, .branch, .description] | @tsv' "$TASK_REGISTRY" | \
+      while IFS=$'\t' read -r id status project branch desc; do
+        local color="$NC"
+        case "$status" in
+          pending) color="$YELLOW" ;;
+          running) color="$BLUE" ;;
+          done)    color="$GREEN" ;;
+          failed)  color="$RED" ;;
+        esac
+        printf "  %-4s ${color}%-10s${NC} %-20s %-25s %s\n" "$id" "$status" "$project" "$branch" "$desc"
+      done
+      echo ""
+      ;;
+    rm|remove)
+      local id="${3:-}"
+      [ -n "$id" ] || die "Usage: dev task rm <id>"
+
+      # If the task has a session, kill it first
+      local session
+      session=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .session // empty' "$TASK_REGISTRY")
+      if [ -n "$session" ] && jq -e --arg s "$session" '.[$s]' "$PORT_REGISTRY" &>/dev/null; then
+        info "Killing session '$session' for task #$id..."
+        cmd_kill "kill" "$session" || true
+      fi
+
+      local tmp="$TASK_REGISTRY.tmp.$$"
+      jq --arg id "$id" '.tasks = [.tasks[] | select(.id != $id)]' "$TASK_REGISTRY" > "$tmp" \
+        && mv "$tmp" "$TASK_REGISTRY"
+      log "Task #$id removed"
+      ;;
+    run)
+      info "Running task runner (single pass)..."
+      exec dev-task-runner --once
+      ;;
+    watch)
+      info "Starting task runner in watch mode..."
+      exec dev-task-runner --watch
+      ;;
+    log|logs)
+      local logfile="$LOG_DIR/task-runner.log"
+      if [ -f "$logfile" ]; then
+        tail -f "$logfile"
+      else
+        info "No task runner log yet."
+      fi
+      ;;
+    *)
+      echo "Usage: dev task <add|ls|rm|run|watch|log>"
+      echo ""
+      echo "  add <project> <branch> \"desc\"  Add a task to the queue"
+      echo "  ls                             List all tasks"
+      echo "  rm <id>                        Remove a task"
+      echo "  run                            Run task runner (single pass)"
+      echo "  watch                          Run task runner (watch mode)"
+      echo "  log                            Tail the runner log"
+      ;;
   esac
 }
 
@@ -3593,6 +3733,14 @@ cmd_help() {
     dev bot stop                            Stop Telegram bot
     dev bot status                          Show bot status
 
+  TASKS (automated task queue)
+    dev task add <project> <branch> "desc"  Add a task to the queue
+    dev task ls                             List all tasks with status
+    dev task rm <id>                        Remove a task
+    dev task run                            Run task runner (single pass)
+    dev task watch                          Run task runner (watch mode)
+    dev task log                            Tail the runner log
+
   SERVICES (systemd — auto-start on boot)
     dev services install                    Install and enable systemd services
     dev services uninstall                  Remove systemd services
@@ -3600,7 +3748,7 @@ cmd_help() {
     dev services stop                       Stop all services
     dev services restart                    Restart all services
     dev services status                     Show service status
-    dev services logs [web|bot]             Follow service logs
+    dev services logs [web|bot|task-runner]  Follow service logs
 
   SETUP HOOKS (checked in priority order)
     1. <worktree>/.dev/setup.sh             In-repo hook (travels with the code)
@@ -3672,6 +3820,7 @@ case "${1:-help}" in
   web)       cmd_web "$@" ;;
   bot)       cmd_bot "$@" ;;
   services)  cmd_services "$@" ;;
+  task)      cmd_task "$@" ;;
   notify)    cmd_notify "$@" ;;
   mobile|m)  cmd_mobile ;;
   help|-h|--help) cmd_help ;;
