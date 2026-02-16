@@ -82,6 +82,83 @@ log() { echo -e "${GREEN}✓${NC} $1"; }
 info() { echo -e "${BLUE}→${NC} $1"; }
 warn() { echo -e "${YELLOW}!${NC} $1"; }
 
+# ── Fun Stuff ──────────────────────────────────────────────────────────────
+
+TIPS=(
+  "Use ${CYAN}dev ask${NC} to quickly chat with AI about your codebase without creating a full session."
+  "Run ${CYAN}dev hub${NC} for a slick TUI to manage all your sessions at a glance."
+  "Feeling brave? Add ${CYAN}--yolo${NC} to skip permissions. Ship it!"
+  "Use ${CYAN}dev diff <session>${NC} to peek at what your agent has been cooking."
+  "Pro tip: ${CYAN}dev new ... --attach${NC} drops you right into the session after creation."
+  "You can send prompts to running agents with ${CYAN}dev send <session> \"do the thing\"${NC}."
+  "Run ${CYAN}dev doctor${NC} to make sure everything is healthy."
+  "Multiple agents? Use ${CYAN}--agents claude,codex${NC} for double the brainpower."
+  "Use ${CYAN}dev sync <session>${NC} to rebase your session on the latest upstream changes."
+  "Clean up dead sessions with ${CYAN}dev gc${NC}. Keep it tidy!"
+  "Configure per-project defaults with ${CYAN}dev config project <name>${NC}."
+  "The ${CYAN}dev mobile${NC} command (or ${CYAN}dev m${NC}) gives you a quick menu for small screens."
+  "Set up Telegram notifications with ${CYAN}dev notify setup${NC} to know when your agent needs attention."
+  "You can run a batch of tasks with ${CYAN}dev task add${NC} and ${CYAN}dev task watch${NC}."
+)
+
+random_tip() {
+  local idx=$((RANDOM % ${#TIPS[@]}))
+  echo -e "  ${DIM}💡 ${TIPS[$idx]}${NC}"
+}
+
+CELEBRATIONS=(
+  "🚀 Let's gooo!"
+  "⚡ Spinning up the matrix..."
+  "🧠 Unleashing the AI..."
+  "🎸 Time to rock and roll!"
+  "🔥 Another one! DJ Khaled voice"
+  "🏗️  Building something awesome..."
+  "✨ The stage is set!"
+  "🎯 Locked and loaded!"
+  "🌊 Riding the wave..."
+  "💪 Let's get this bread!"
+)
+
+FAREWELLS=(
+  "👋 Gone but not forgotten."
+  "🫡 Session served with honor."
+  "💀 RIP. You won't be missed (jk)."
+  "🧹 Clean as a whistle."
+  "🗑️  Into the void it goes..."
+  "⚰️  May it rest in /dev/null."
+  "🎬 That's a wrap!"
+  "🏁 Finished. On to the next one."
+  "🌅 Every session must end."
+  "✌️  Peace out!"
+)
+
+FORTUNES=(
+  "A clever person solves a problem.\nA wise person avoids it.\nA developer automates it."
+  "There are only two hard things in CS:\ncache invalidation, naming things,\nand off-by-one errors."
+  "It works on my machine.\n  — Every developer, since the dawn of time"
+  "The best code is no code at all.\nThe second best is code an AI wrote for you."
+  "git commit -m 'fixed it'\ngit commit -m 'actually fixed it'\ngit commit -m 'ok for real this time'"
+  "Q: Why do programmers prefer dark mode?\nA: Because light attracts bugs."
+  "Weeks of coding can save you\nhours of planning."
+  "Debugging is like being a detective\nin a crime movie where you are\nalso the murderer."
+  "sudo make me a sandwich.\n  — xkcd"
+  "rm -rf node_modules && npm install\nThe universal fix."
+  "I don't always test my code,\nbut when I do, I do it in production."
+  "How many agents does it take\nto change a lightbulb?\nOne, but it'll refactor the\nentire electrical system first."
+  "The code is documentation enough.\n  — Narrator: It was not."
+  "A QA engineer walks into a bar.\nOrders 1 beer. Orders 0 beers.\nOrders 99999999 beers.\nOrders -1 beers.\nOrders a lizard."
+)
+
+random_celebration() {
+  local idx=$((RANDOM % ${#CELEBRATIONS[@]}))
+  echo -e "  ${CELEBRATIONS[$idx]}"
+}
+
+random_farewell() {
+  local idx=$((RANDOM % ${#FAREWELLS[@]}))
+  echo -e "  ${FAREWELLS[$idx]}"
+}
+
 fix_registry_perms() {
   [[ "$PORT_REGISTRY" == "$GLOBAL_PORT_REGISTRY" ]] && chmod 664 "$PORT_REGISTRY" 2>/dev/null
 }
@@ -1119,6 +1196,7 @@ cmd_new() {
   tmux set-environment -t "$name" DEV_SLOT "$slot"
 
   log "Session '$name' is running!"
+  random_celebration
   echo ""
   echo -e "  ${BOLD}Session:${NC}  $name"
   echo -e "  ${BOLD}Agent(s):${NC} $agent"
@@ -1259,6 +1337,8 @@ cmd_ls() {
   printf "\n"
   echo -e "  ${DIM}Frontend URLs:  http://$ip:<port>${NC}"
   echo -e "  ${DIM}Attach:         dev attach <session>${NC}"
+  printf "\n"
+  random_tip
   printf "\n"
 }
 
@@ -1530,6 +1610,7 @@ cmd_kill() {
   # Unregister
   unregister_session "$name"
   log "Session '$name' fully cleaned up"
+  random_farewell
 }
 
 cmd_dashboard() {
@@ -4025,6 +4106,103 @@ cmd_ask() {
   echo ""
 }
 
+cmd_vibes() {
+  local arts=(
+    "
+    ${CYAN}    ╔══════════════════════════════════╗
+    ║   ${BOLD}🤖 AGENTS ARE CODING 🤖${NC}${CYAN}        ║
+    ║                                  ║
+    ║   ${NC}${DIM}While you sleep, they ship.${NC}${CYAN}     ║
+    ║   ${NC}${DIM}While you eat, they commit.${NC}${CYAN}    ║
+    ║   ${NC}${DIM}While you dream, they deploy.${NC}${CYAN}  ║
+    ║                                  ║
+    ╚══════════════════════════════════╝${NC}"
+    "
+    ${GREEN}        _______________
+       /               \\
+      |  $ dev new ...  |
+      |  ${DIM}spawning agent${NC}${GREEN} |
+       \\_____   _______/
+             | /
+         ${NC}${BOLD}(•_•)${NC}${GREEN}
+         ${NC}${BOLD}<)  )╯${NC}  ${DIM}ship it!${NC}
+         ${NC}${BOLD} /  \\${NC}"
+    "
+    ${YELLOW}  ┌─────────────────────────────┐
+  │                             │
+  │   ${NC}${BOLD}TODAY'S VIBE:${NC}${YELLOW}              │
+  │                             │
+  │   ${NC}Let the machines handle${YELLOW}    │
+  │   ${NC}the boring stuff.${YELLOW}          │
+  │   ${NC}You focus on the${YELLOW}           │
+  │   ${NC}${BOLD}creative${NC} ${NC}stuff.${YELLOW}            │
+  │                             │
+  └─────────────────────────────┘${NC}"
+  )
+
+  local idx=$((RANDOM % ${#arts[@]}))
+  echo ""
+  echo -e "${arts[$idx]}"
+  echo ""
+
+  local session_count=0
+  if [[ -f "$PORT_REGISTRY" ]]; then
+    session_count=$(jq 'length' "$PORT_REGISTRY" 2>/dev/null || echo 0)
+  fi
+
+  if [ "$session_count" -gt 0 ]; then
+    local alive=0
+    local sessions
+    sessions=$(jq -r 'keys[]' "$PORT_REGISTRY" 2>/dev/null)
+    while IFS= read -r name; do
+      tmux has-session -t "$name" 2>/dev/null && alive=$((alive + 1))
+    done <<< "$sessions"
+    echo -e "  ${BOLD}${alive}${NC} agent(s) currently vibing across ${BOLD}${session_count}${NC} session(s)"
+  else
+    echo -e "  ${DIM}No sessions running. Start one with ${CYAN}dev new${DIM} and get the vibes going!${NC}"
+  fi
+  echo ""
+  random_tip
+  echo ""
+}
+
+cmd_fortune() {
+  local idx=$((RANDOM % ${#FORTUNES[@]}))
+  echo ""
+  echo -e "  ${CYAN}╭────────────────────────────────────────╮${NC}"
+  echo -e "  ${CYAN}│${NC}  ${BOLD}🔮 Dev Fortune${NC}                        ${CYAN}│${NC}"
+  echo -e "  ${CYAN}│${NC}                                        ${CYAN}│${NC}"
+  while IFS= read -r line; do
+    printf "  ${CYAN}│${NC}  %-38s${CYAN}│${NC}\n" "$line"
+  done <<< "$(echo -e "${FORTUNES[$idx]}")"
+  echo -e "  ${CYAN}│${NC}                                        ${CYAN}│${NC}"
+  echo -e "  ${CYAN}╰────────────────────────────────────────╯${NC}"
+  echo ""
+}
+
+cmd_lenny() {
+  local lennys=(
+    "( ͡° ͜ʖ ͡°)"
+    "¯\\_(ツ)_/¯"
+    "(╯°□°)╯︵ ┻━┻"
+    "┬─┬ノ( º _ ºノ)"
+    "ʕ•ᴥ•ʔ"
+    "(☞ﾟヮﾟ)☞"
+    "( ˘ ³˘)♥"
+    "ᕕ( ᐛ )ᕗ"
+    "(⌐■_■)"
+    "~(˘▾˘~)"
+    "ಠ_ಠ"
+    "(ノಠ益ಠ)ノ彡┻━┻"
+    "( ͡~ ͜ʖ ͡°)"
+    "¯\\(°_o)/¯"
+  )
+  local idx=$((RANDOM % ${#lennys[@]}))
+  echo ""
+  echo -e "  ${lennys[$idx]}"
+  echo ""
+}
+
 cmd_help() {
   cat << 'HELPEOF'
 
@@ -4173,6 +4351,11 @@ cmd_help() {
     dev attach klyra-feat-trading-ui
     dev kill klyra-fix-auth-bug
 
+  FUN
+    dev vibes                               Show ASCII art + agent status + random tip
+    dev fortune                             Random dev joke / wisdom
+    dev lenny                               Random lenny face (essential tooling)
+
   TMUX CHEATSHEET (inside a session)
     Ctrl+a d          Detach (session keeps running)
     Ctrl+a s          Switch between sessions
@@ -4182,6 +4365,9 @@ cmd_help() {
     Ctrl+a -          Split horizontally
 
 HELPEOF
+  echo ""
+  random_tip
+  echo ""
 }
 
 # ── Main ────────────────────────────────────────────────────────────────────
@@ -4225,6 +4411,9 @@ case "${1:-help}" in
   notify)    cmd_notify "$@" ;;
   ask)       cmd_ask "$@" ;;
   mobile|m)  cmd_mobile ;;
+  vibes)     cmd_vibes ;;
+  fortune)   cmd_fortune ;;
+  lenny)     cmd_lenny ;;
   help|-h|--help) cmd_help ;;
   *)         die "Unknown command: $1. Run 'dev help' for usage." ;;
 esac
