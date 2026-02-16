@@ -4,3 +4,4 @@
 *~
 plans
 secrets/
+.env.local
