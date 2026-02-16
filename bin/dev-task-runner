@@ -21,6 +21,16 @@ TASK_REGISTRY="$CONFIG_DIR/tasks.json"
 LOG_DIR="$CONFIG_DIR/logs"
 LOG_FILE="$LOG_DIR/task-runner.log"
 
+# Port registry: prefer global (matches bin/dev behavior), fall back to local
+GLOBAL_PORT_REGISTRY="/etc/dev-cli/ports.json"
+if [ -f "$GLOBAL_PORT_REGISTRY" ] && [ -r "$GLOBAL_PORT_REGISTRY" ]; then
+  PORT_REGISTRY="$GLOBAL_PORT_REGISTRY"
+elif [ -f "$CONFIG_DIR/ports.json" ]; then
+  PORT_REGISTRY="$CONFIG_DIR/ports.json"
+else
+  PORT_REGISTRY="$GLOBAL_PORT_REGISTRY"
+fi
+
 mkdir -p "$LOG_DIR"
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -79,9 +89,11 @@ process_pending() {
   # Strip ANSI codes before parsing
   session_name=$(echo "$dev_output" | sed 's/\x1b\[[0-9;]*m//g' | grep -oP 'Session:\s+\K\S+' | head -1)
 
-  # Fallback: derive session name from project-branch convention
+  # Fallback: derive session name from user-project-branch convention (matches bin/dev session_name())
   if [ -z "$session_name" ]; then
-    session_name="${project}-$(echo "$branch" | tr '/' '-')"
+    local slug
+    slug=$(echo "$branch" | sed 's/[^a-zA-Z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//' | tr '[:upper:]' '[:lower:]')
+    session_name="${USER}-${project}-${slug}"
   fi
 
   # Check the session actually exists
@@ -96,7 +108,7 @@ process_pending() {
 
   # Find worktree path
   local worktree
-  worktree=$(jq -r --arg s "$session_name" '.[$s].worktree // .[$s].path // empty' "$CONFIG_DIR/ports.json")
+  worktree=$(jq -r --arg s "$session_name" '.[$s].worktree // .[$s].path // empty' "$PORT_REGISTRY")
 
   if [ -z "$worktree" ] || [ ! -d "$worktree" ]; then
     log "ERROR: Could not find worktree for session $session_name"
@@ -153,7 +165,7 @@ check_running() {
     session=$(task_field "$id" "session")
     [ -n "$session" ] && [ "$session" != "null" ] || continue
 
-    worktree=$(jq -r --arg s "$session" '.[$s].worktree // .[$s].path // empty' "$CONFIG_DIR/ports.json")
+    worktree=$(jq -r --arg s "$session" '.[$s].worktree // .[$s].path // empty' "$PORT_REGISTRY")
     [ -n "$worktree" ] && [ -d "$worktree" ] || continue
 
     # Check for .task-done marker
