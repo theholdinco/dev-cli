@@ -2727,32 +2727,38 @@ cmd_projects() {
 }
 
 cmd_update() {
-  # Check common repo locations
-  local REPO_DIR=""
-  for candidate in /opt/dev-cli "$HOME/.dev-cli-repo"; do
-    if [ -f "$candidate/bin/dev" ]; then
-      REPO_DIR="$candidate"
-      break
-    fi
-  done
+  local GITHUB_REPO="GonzaDDV/dev-cli"
+  local BRANCH="${1:-main}"
+  local TARBALL_URL="https://github.com/${GITHUB_REPO}/archive/refs/heads/${BRANCH}.tar.gz"
 
-  if [ -z "$REPO_DIR" ]; then
-    die "dev-cli repo not found. Expected at /opt/dev-cli or ~/.dev-cli-repo"
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp_dir'" EXIT
+
+  info "Downloading latest dev-cli from GitHub (${BRANCH})..."
+  if ! curl -fsSL "$TARBALL_URL" -o "$tmp_dir/dev-cli.tar.gz"; then
+    rm -rf "$tmp_dir"
+    trap - EXIT
+    die "Failed to download from GitHub. Check your internet connection."
   fi
 
-  # Pull if user has write access, otherwise just reinstall from what's there
-  if [ -w "$REPO_DIR" ]; then
-    info "Pulling latest changes..."
-    cd "$REPO_DIR"
-    git pull origin main 2>&1 | tail -5
-  else
-    info "Using $REPO_DIR (no write access — ask admin to 'git pull' if needed)"
+  info "Extracting..."
+  tar -xzf "$tmp_dir/dev-cli.tar.gz" -C "$tmp_dir" --strip-components=1
+
+  if [ ! -f "$tmp_dir/install.sh" ]; then
+    rm -rf "$tmp_dir"
+    trap - EXIT
+    die "Invalid archive — install.sh not found"
   fi
 
-  info "Reinstalling..."
-  bash "$REPO_DIR/install.sh" <<< "N"
+  info "Installing..."
+  bash "$tmp_dir/install.sh" <<< "N"
 
-  log "Updated to latest version"
+  rm -rf "$tmp_dir"
+  trap - EXIT
+
+  log "Updated to latest version from GitHub (${BRANCH})"
 }
 
 cmd_config() {
@@ -4500,7 +4506,7 @@ cmd_help() {
     dev init                                Interactive project setup (recommended)
     dev setup <project> <github-ssh-url>    Quick setup (bare clone only)
     dev projects                            List all configured projects
-    dev update                              Pull latest and reinstall
+    dev update [branch]                     Download latest from GitHub and reinstall
     dev help                                Show this help
 
   SESSIONS
@@ -4691,7 +4697,7 @@ case "${1:-help}" in
   img)       cmd_img "$@" ;;
   worktree)  cmd_worktree "$@" ;;
   projects)  cmd_projects ;;
-  update)    cmd_update ;;
+  update)    cmd_update "${2:-}" ;;
   status)    cmd_status "$@" ;;
   restart)   cmd_restart "$@" ;;
   send)      cmd_send "$@" ;;
