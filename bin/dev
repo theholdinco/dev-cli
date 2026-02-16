@@ -4243,6 +4243,157 @@ cmd_ghost() {
   echo ""
 }
 
+cmd_review() {
+  local session_or_pr="${2:-}" yolo=false
+  shift || true
+  shift || true
+
+  # Parse options
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --yolo) yolo=true; shift ;;
+      *) shift ;;
+    esac
+  done
+
+  [ -z "$session_or_pr" ] && die "Usage: dev review <session|pr-url> [--yolo]"
+
+  local pr_url="" project="" branch="" worktree=""
+
+  # Check if argument is a PR URL
+  if [[ "$session_or_pr" == http* ]]; then
+    pr_url="$session_or_pr"
+    # Extract project and branch from the PR
+    project=$(gh pr view "$pr_url" --json headRepository --jq '.headRepository.name' 2>/dev/null) \
+      || die "Could not fetch PR info from $pr_url"
+    branch=$(gh pr view "$pr_url" --json headRefName --jq '.headRefName' 2>/dev/null) \
+      || die "Could not fetch branch from $pr_url"
+  else
+    # Argument is a session name — resolve it
+    local match
+    match=$(jq -r "keys[] | select(contains(\"$session_or_pr\"))" "$PORT_REGISTRY" | head -1)
+    [ -z "$match" ] && die "No session matching '$session_or_pr'"
+
+    project=$(get_session_field "$match" "project")
+    branch=$(get_session_field "$match" "branch")
+    worktree=$(get_session_field "$match" "path")
+
+    # Try to find the PR for this branch
+    pr_url=$(cd "$worktree" && gh pr view "$branch" --json url --jq '.url' 2>/dev/null) || true
+    [ -z "$pr_url" ] && die "No PR found for branch '$branch'. Push and create a PR first."
+  fi
+
+  local bare_dir="$PROJECTS_DIR/$project"
+  [ -d "$bare_dir" ] || die "Project '$project' not found."
+
+  # Resolve yolo from project config
+  if [ "$yolo" != true ] && [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
+    local config_yolo
+    config_yolo=$(jq -r '.skip_permissions // false' "$CONFIG_DIR/projects/${project}.json" 2>/dev/null)
+    [ "$config_yolo" = "true" ] && yolo=true
+  fi
+
+  # Create a temporary worktree on the PR branch
+  local ts
+  ts=$(date +%s)
+  local wt_dir="$PROJECTS_DIR/${project}-worktrees"
+  local tmp_path="$wt_dir/.review-${ts}"
+  local slug
+  slug=$(slugify "$branch")
+  local name="${USER}-${project}-review-${slug}"
+
+  # Check for existing review session
+  [ -z "$(get_session "$name")" ] || die "Review session '$name' already exists."
+
+  mkdir -p "$wt_dir"
+  info "Creating review worktree for branch '$branch'..."
+  cd "$bare_dir"
+  git fetch origin --prune 2>/dev/null || true
+  git worktree add "$tmp_path" "origin/$branch" --detach 2>/dev/null \
+    || die "Failed to create review worktree"
+
+  # Register in port registry (no slot or ports — lightweight review session)
+  local agents_json='["claude"]'
+  (
+    flock -x 200
+    local tmp
+    tmp=$(mktemp)
+    jq --arg name "$name" \
+       --arg project "$project" \
+       --arg branch "$branch" \
+       --arg path "$tmp_path" \
+       --arg owner "$USER" \
+       --arg pr_url "$pr_url" \
+       --arg created "$(date -Iseconds)" \
+       '.[$name] = {
+          project: $project,
+          branch: $branch,
+          slot: 0,
+          agent: "claude",
+          agents: ["claude"],
+          path: $path,
+          owner: $owner,
+          type: "review",
+          pr_url: $pr_url,
+          ports: {
+            frontend: null,
+            backend: null,
+            supa_api: null,
+            supa_db: null,
+            supa_studio: null
+          },
+          created: $created
+        }' "$PORT_REGISTRY" > "$tmp"
+    mv "$tmp" "$PORT_REGISTRY"
+    fix_registry_perms
+  ) 200>"${PORT_REGISTRY}.lock"
+
+  # Source secrets
+  local env_prefix=""
+  if [ -f "$SECRETS_FILE" ]; then
+    env_prefix="source $SECRETS_FILE && "
+  fi
+
+  # Build agent command
+  local claude_flags=""
+  [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
+
+  # Load review prompt
+  local prompt_file=""
+  if [ -f "$CONFIG_DIR/prompts/pr-review.md" ]; then
+    prompt_file="$CONFIG_DIR/prompts/pr-review.md"
+  elif [ -f "$(dirname "$(readlink -f "$0")")/../prompts/pr-review.md" ]; then
+    prompt_file="$(dirname "$(readlink -f "$0")")/../prompts/pr-review.md"
+  fi
+
+  local agent_cmd
+  if [ -n "$prompt_file" ]; then
+    # Copy prompt into the review worktree so Claude can read it
+    cp "$prompt_file" "$tmp_path/.review-prompt.md"
+    agent_cmd="cd $tmp_path && claude${claude_flags} \"Read .review-prompt.md and follow the instructions to review this PR. The PR URL is: $pr_url\""
+  else
+    agent_cmd="cd $tmp_path && claude${claude_flags} \"Review the PR at $pr_url. Run gh pr diff to see changes, run pnpm lint if available, check for code quality issues, slop comments, performance problems, and security concerns. Submit your review using gh pr review --comment. When done, run: touch .review-done\""
+  fi
+
+  # Create tmux session
+  tmux new-session -d -s "$name" -n "agent" "${env_prefix}${agent_cmd}"
+  tmux new-window -t "$name" -n "shell" "cd $tmp_path && bash"
+  tmux select-window -t "$name:1"
+
+  log "Review session '$name' is running!"
+  echo ""
+  echo -e "  ${BOLD}Session:${NC}  $name"
+  echo -e "  ${BOLD}Agent:${NC}    claude"
+  echo -e "  ${BOLD}Project:${NC}  $project"
+  echo -e "  ${BOLD}Branch:${NC}   $branch"
+  echo -e "  ${BOLD}PR:${NC}       $pr_url"
+  echo -e "  ${BOLD}Type:${NC}     review ${DIM}(read-only, no ports)${NC}"
+  echo ""
+  echo -e "  ${DIM}Attach:    dev attach $name${NC}"
+  echo -e "  ${DIM}Kill:      dev kill $name${NC}"
+  echo ""
+}
+
 cmd_vibes() {
   local arts=(
     "
@@ -4395,6 +4546,11 @@ cmd_help() {
     dev pr <session> --draft                Create as draft PR
     dev pr <session> --title "Fix auth"     Set PR title
     dev pr <session> --kill                 Auto-kill session after PR creation
+
+  CODE REVIEW
+    dev review <session>                    Auto-review the PR for a session
+    dev review <pr-url>                     Review a PR by URL
+    dev review <session|pr-url> --yolo      Skip agent permissions
 
   UTILITIES
     dev ports                               Show port allocation table
@@ -4554,6 +4710,7 @@ case "${1:-help}" in
   notify)    cmd_notify "$@" ;;
   ask)       cmd_ask "$@" ;;
   ghost)     cmd_ghost "$@" ;;
+  review)    cmd_review "$@" ;;
   mobile|m)  cmd_mobile ;;
   vibes)     cmd_vibes ;;
   fortune)   cmd_fortune ;;
