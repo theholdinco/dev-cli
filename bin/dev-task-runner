@@ -245,15 +245,50 @@ complete_task() {
     git push origin "$branch" 2>&1 >> "$LOG_FILE" || true
   fi
 
-  # Mark done
-  local now
-  now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-  local tmp="$TASK_REGISTRY.tmp.$$"
-  jq --arg id "$id" --arg now "$now" \
-    '(.tasks[] | select(.id == $id)) |= (.status = "done" | .completed = $now)' \
-    "$TASK_REGISTRY" > "$tmp" && mv "$tmp" "$TASK_REGISTRY"
+  log "Task $id is now pr-created — waiting for PR to be merged"
+}
 
-  log "Task $id marked as done"
+# ── Check pr-created tasks for merged PRs ────────────────────────────────────
+
+check_merged() {
+  [ -f "$TASK_REGISTRY" ] || return 0
+
+  local pr_tasks
+  pr_tasks=$(jq -r '.tasks[] | select(.status == "pr-created") | .id' "$TASK_REGISTRY")
+  [ -n "$pr_tasks" ] || return 0
+
+  while IFS= read -r id; do
+    local pr_url session
+    pr_url=$(task_field "$id" "pr_url")
+    [ -n "$pr_url" ] && [ "$pr_url" != "null" ] || continue
+
+    # Check PR merge status via gh
+    local pr_state
+    pr_state=$(gh pr view "$pr_url" --json state --jq '.state' 2>/dev/null) || continue
+
+    if [ "$pr_state" = "MERGED" ]; then
+      log "Task $id PR merged: $pr_url"
+
+      # Kill the session if still running
+      session=$(task_field "$id" "session")
+      if [ -n "$session" ] && [ "$session" != "null" ] && tmux has-session -t "$session" 2>/dev/null; then
+        log "Killing session $session for completed task $id"
+        dev kill "$session" 2>&1 | tail -3 >> "$LOG_FILE" || true
+      fi
+
+      local now
+      now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+      local tmp="$TASK_REGISTRY.tmp.$$"
+      jq --arg id "$id" --arg now "$now" \
+        '(.tasks[] | select(.id == $id)) |= (.status = "done" | .completed = $now)' \
+        "$TASK_REGISTRY" > "$tmp" && mv "$tmp" "$TASK_REGISTRY"
+
+      log "Task $id marked as done"
+    elif [ "$pr_state" = "CLOSED" ]; then
+      log "Task $id PR was closed without merging: $pr_url"
+      update_task "$id" "status" "failed"
+    fi
+  done <<< "$pr_tasks"
 }
 
 # ── Single pass ──────────────────────────────────────────────────────────────
@@ -261,6 +296,7 @@ complete_task() {
 run_once() {
   process_pending
   check_running
+  check_merged
 }
 
 # ── Main ─────────────────────────────────────────────────────────────────────
