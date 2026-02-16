@@ -14,12 +14,14 @@ def create_app():
     from .routes.commands import commands_bp
     from .routes.system import system_bp
     from .routes.sse import sse_bp
+    from .routes.tasks import tasks_bp
 
     app.register_blueprint(sessions_bp)
     app.register_blueprint(agents_bp)
     app.register_blueprint(commands_bp)
     app.register_blueprint(system_bp)
     app.register_blueprint(sse_bp)
+    app.register_blueprint(tasks_bp)
 
     @app.route("/")
     def index():

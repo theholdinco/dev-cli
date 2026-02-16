@@ -39,11 +39,13 @@ mkdir -p "$HOME/images"
 cp "$REPO_DIR/bin/dev" "$BIN_DIR/dev.new"
 cp "$REPO_DIR/bin/dev-hub" "$BIN_DIR/dev-hub.new"
 cp "$REPO_DIR/bin/claude-tg-notify" "$BIN_DIR/claude-tg-notify.new"
-chmod +x "$BIN_DIR/dev.new" "$BIN_DIR/dev-hub.new" "$BIN_DIR/claude-tg-notify.new"
+cp "$REPO_DIR/bin/dev-task-runner" "$BIN_DIR/dev-task-runner.new"
+chmod +x "$BIN_DIR/dev.new" "$BIN_DIR/dev-hub.new" "$BIN_DIR/claude-tg-notify.new" "$BIN_DIR/dev-task-runner.new"
 mv "$BIN_DIR/dev.new" "$BIN_DIR/dev"
 mv "$BIN_DIR/dev-hub.new" "$BIN_DIR/dev-hub"
 mv "$BIN_DIR/claude-tg-notify.new" "$BIN_DIR/claude-tg-notify"
-log "Installed dev, dev-hub, and claude-tg-notify to $BIN_DIR/"
+mv "$BIN_DIR/dev-task-runner.new" "$BIN_DIR/dev-task-runner"
+log "Installed dev, dev-hub, claude-tg-notify, and dev-task-runner to $BIN_DIR/"
 
 # Install web dashboard files
 WEB_DIR="$HOME/.local/share/dev-cli/web"
@@ -145,6 +147,12 @@ if [ ! -f "$CONFIG_DIR/ports.json" ]; then
   log "Created port registry"
 fi
 
+# Create empty task registry if it doesn't exist
+if [ ! -f "$CONFIG_DIR/tasks.json" ]; then
+  echo '{"tasks":[],"next_id":1}' > "$CONFIG_DIR/tasks.json"
+  log "Created task registry"
+fi
+
 # Generate tab completion
 info "Setting up tab completion..."
 COMPLETION_FILE="$CONFIG_DIR/completion.bash"
@@ -157,7 +165,7 @@ _dev() {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
   # All available commands
-  commands="init setup new ls attach kill hub dashboard ports logs url supabase pr shell worktree img projects update help status restart send diff sync gc template config agent stats doctor web bot services notify mobile m"
+  commands="init setup new ls attach kill hub dashboard ports logs url supabase pr shell worktree img projects update help status restart send diff sync gc template config agent stats doctor web bot services notify mobile m task"
 
   # Commands that take a session name as argument
   session_cmds="attach kill logs url shell pr status restart send diff sync"
@@ -229,6 +237,12 @@ _dev() {
   # notify subcommands
   if [ "$cmd" = "notify" ] && [ "$COMP_CWORD" -eq 2 ]; then
     COMPREPLY=( $(compgen -W "setup status test delay" -- "$cur") )
+    return 0
+  fi
+
+  # task subcommands
+  if [ "$cmd" = "task" ] && [ "$COMP_CWORD" -eq 2 ]; then
+    COMPREPLY=( $(compgen -W "add ls rm run watch log" -- "$cur") )
     return 0
   fi
 

@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+
+{% block title %}Tasks - dev-cli{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold text-white">Tasks</h1>
+    <div class="flex items-center space-x-3">
+        <form method="POST" action="{{ url_for('tasks.run_tasks_view') }}" class="inline">
+            <button type="submit"
+                    class="bg-green-600 hover:bg-green-500 text-white text-sm font-medium px-4 py-2 rounded-md transition-colors">
+                Run Now
+            </button>
+        </form>
+        <a href="{{ url_for('tasks.new_task_form') }}"
+           class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-md transition-colors">
+            Add Task
+        </a>
+    </div>
+</div>
+
+{% if tasks %}
+<div class="overflow-x-auto">
+    <table class="w-full text-sm text-left">
+        <thead class="text-xs text-gray-400 uppercase bg-gray-800 border-b border-gray-700">
+            <tr>
+                <th class="px-4 py-3">ID</th>
+                <th class="px-4 py-3">Status</th>
+                <th class="px-4 py-3">Project</th>
+                <th class="px-4 py-3">Branch</th>
+                <th class="px-4 py-3">Description</th>
+                <th class="px-4 py-3">Session</th>
+                <th class="px-4 py-3">PR</th>
+                <th class="px-4 py-3">Age</th>
+                <th class="px-4 py-3">Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for task in tasks %}
+            <tr class="border-b border-gray-700 hover:bg-gray-800/50">
+                <td class="px-4 py-3 font-mono text-gray-300">#{{ task.id }}</td>
+                <td class="px-4 py-3">
+                    {% set color = task_status_color(task.status) %}
+                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+                        {% if color == 'yellow' %}bg-yellow-900/50 text-yellow-300
+                        {% elif color == 'blue' %}bg-blue-900/50 text-blue-300
+                        {% elif color == 'green' %}bg-green-900/50 text-green-300
+                        {% elif color == 'red' %}bg-red-900/50 text-red-300
+                        {% else %}bg-gray-900/50 text-gray-300{% endif %}">
+                        {{ task.status }}
+                    </span>
+                </td>
+                <td class="px-4 py-3 text-gray-300">{{ task.project }}</td>
+                <td class="px-4 py-3 font-mono text-gray-300">{{ task.branch }}</td>
+                <td class="px-4 py-3 text-gray-200 max-w-xs truncate">{{ task.description }}</td>
+                <td class="px-4 py-3">
+                    {% if task.session %}
+                        <a href="{{ url_for('sessions.session_detail', name=task.session) }}"
+                           class="text-blue-400 hover:text-blue-300 font-mono text-xs">{{ task.session }}</a>
+                    {% else %}
+                        <span class="text-gray-500">—</span>
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3">
+                    {% if task.pr_url %}
+                        <a href="{{ task.pr_url }}" target="_blank"
+                           class="text-blue-400 hover:text-blue-300 text-xs">View PR</a>
+                    {% else %}
+                        <span class="text-gray-500">—</span>
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 text-gray-400 text-xs">
+                    {% if task.created %}
+                        {{ task.created[:16] | replace('T', ' ') }}
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3">
+                    {% if task.status in ['pending', 'failed'] %}
+                    <form method="POST" action="{{ url_for('tasks.remove_task_view', task_id=task.id) }}" class="inline">
+                        <button type="submit"
+                                class="text-red-400 hover:text-red-300 text-xs font-medium"
+                                onclick="return confirm('Remove task #{{ task.id }}?')">
+                            Remove
+                        </button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="text-center py-16">
+    <p class="text-gray-500 text-lg mb-4">No tasks in the queue</p>
+    <a href="{{ url_for('tasks.new_task_form') }}"
+       class="text-blue-400 hover:text-blue-300 underline">Add your first task</a>
+</div>
+{% endif %}
+{% endblock %}

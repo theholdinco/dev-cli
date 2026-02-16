@@ -10,4 +10,5 @@ SECRETS_FILE = os.path.join(CONFIG_DIR, "secrets.env")
 LOG_DIR = os.path.join(CONFIG_DIR, "logs")
 WEB_DIR = os.path.expanduser("~/.local/share/dev-cli/web")
 
+TASK_REGISTRY = os.path.join(CONFIG_DIR, "tasks.json")
 DEV_BIN = os.path.expanduser("~/.local/bin/dev")

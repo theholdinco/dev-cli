@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+###############################################################################
+# dev-task-runner — Automated task queue daemon for dev-cli
+#
+# Processes pending tasks from tasks.json:
+#   1. Creates worktree + session via `dev new`
+#   2. Writes TASK.md with instructions
+#   3. Sends Claude a prompt via `dev send`
+#   4. Monitors for .task-done marker
+#   5. On completion: pushes branch, creates PR, marks done
+#
+# Usage:
+#   dev-task-runner --once    Single pass (process one pending + check running)
+#   dev-task-runner --watch   Loop mode (runs --once every 60s)
+###############################################################################
+
+set -euo pipefail
+
+CONFIG_DIR="$HOME/.config/dev-cli"
+TASK_REGISTRY="$CONFIG_DIR/tasks.json"
+LOG_DIR="$CONFIG_DIR/logs"
+LOG_FILE="$LOG_DIR/task-runner.log"
+
+mkdir -p "$LOG_DIR"
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+
+log() {
+  local ts
+  ts=$(date '+%Y-%m-%d %H:%M:%S')
+  echo "[$ts] $1" >> "$LOG_FILE"
+  echo "[$ts] $1"
+}
+
+# ── JSON helpers ─────────────────────────────────────────────────────────────
+
+task_field() {
+  local id="$1" field="$2"
+  jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .'"$field" "$TASK_REGISTRY"
+}
+
+update_task() {
+  local id="$1" field="$2" value="$3"
+  local tmp="$TASK_REGISTRY.tmp.$$"
+  jq --arg id "$id" --arg f "$field" --arg v "$value" \
+    '(.tasks[] | select(.id == $id))[$f] = $v' "$TASK_REGISTRY" > "$tmp" \
+    && mv "$tmp" "$TASK_REGISTRY"
+}
+
+# ── Process one pending task ─────────────────────────────────────────────────
+
+process_pending() {
+  [ -f "$TASK_REGISTRY" ] || return 0
+
+  # Find first pending task
+  local task_json
+  task_json=$(jq -r '.tasks[] | select(.status == "pending") | @json' "$TASK_REGISTRY" | head -1)
+  [ -n "$task_json" ] || return 0
+
+  local id project branch description
+  id=$(echo "$task_json" | jq -r '.id')
+  project=$(echo "$task_json" | jq -r '.project')
+  branch=$(echo "$task_json" | jq -r '.branch')
+  description=$(echo "$task_json" | jq -r '.description')
+
+  log "Processing task $id: $project/$branch — $description"
+
+  # Mark as running
+  local now
+  now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  local tmp="$TASK_REGISTRY.tmp.$$"
+  jq --arg id "$id" --arg now "$now" \
+    '(.tasks[] | select(.id == $id)) |= (.status = "running" | .started = $now)' \
+    "$TASK_REGISTRY" > "$tmp" && mv "$tmp" "$TASK_REGISTRY"
+
+  # Create session via dev new
+  local session_name
+  if ! session_name=$(dev new "$project" "$branch" --agent claude --yolo 2>&1 | grep -oP '(?<=Session: )\S+' | head -1); then
+    log "ERROR: Failed to create session for task $id"
+    update_task "$id" "status" "failed"
+    return 1
+  fi
+
+  # Fallback: derive session name from project-branch convention
+  if [ -z "$session_name" ]; then
+    session_name="${project}-$(echo "$branch" | tr '/' '-')"
+  fi
+
+  log "Session created: $session_name"
+  update_task "$id" "session" "$session_name"
+
+  # Find worktree path
+  local worktree
+  worktree=$(jq -r --arg s "$session_name" '.[$s].worktree // .[$s].path // empty' "$CONFIG_DIR/ports.json")
+
+  if [ -z "$worktree" ] || [ ! -d "$worktree" ]; then
+    log "ERROR: Could not find worktree for session $session_name"
+    update_task "$id" "status" "failed"
+    return 1
+  fi
+
+  # Write TASK.md
+  cat > "$worktree/TASK.md" << TASKEOF
+# Task: $description
+
+## Project
+$project
+
+## Branch
+$branch
+
+## Instructions
+
+Please implement the following task:
+
+$description
+
+## When done
+
+1. Make sure all changes are committed
+2. Run any relevant tests to verify your changes work
+3. Create a file called \`.task-done\` in the project root: \`touch .task-done\`
+
+This signals the task runner that you've completed the work.
+TASKEOF
+
+  log "Wrote TASK.md to $worktree"
+
+  # Send Claude the prompt
+  sleep 3  # Give Claude a moment to start up
+  local prompt="Read the TASK.md file in this project root. It contains your task. Follow the instructions carefully. When you are completely done, run: touch .task-done"
+  dev send "$session_name" "$prompt" 2>&1 | head -5 >> "$LOG_FILE" || true
+
+  log "Sent prompt to $session_name for task $id"
+}
+
+# ── Check running tasks ─────────────────────────────────────────────────────
+
+check_running() {
+  [ -f "$TASK_REGISTRY" ] || return 0
+
+  local running_tasks
+  running_tasks=$(jq -r '.tasks[] | select(.status == "running") | .id' "$TASK_REGISTRY")
+  [ -n "$running_tasks" ] || return 0
+
+  while IFS= read -r id; do
+    local session worktree
+    session=$(task_field "$id" "session")
+    [ -n "$session" ] && [ "$session" != "null" ] || continue
+
+    worktree=$(jq -r --arg s "$session" '.[$s].worktree // .[$s].path // empty' "$CONFIG_DIR/ports.json")
+    [ -n "$worktree" ] && [ -d "$worktree" ] || continue
+
+    # Check for .task-done marker
+    if [ -f "$worktree/.task-done" ]; then
+      log "Task $id completed! (session: $session)"
+      complete_task "$id" "$session" "$worktree"
+    fi
+  done <<< "$running_tasks"
+}
+
+# ── Complete a task: push, PR, mark done ─────────────────────────────────────
+
+complete_task() {
+  local id="$1" session="$2" worktree="$3"
+
+  # Commit any uncommitted changes
+  cd "$worktree"
+  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+    git add -A
+    git commit -m "Task completed: $(task_field "$id" "description")" --no-verify 2>&1 | tail -3 >> "$LOG_FILE" || true
+  fi
+
+  # Remove the marker file and TASK.md from tracking
+  rm -f "$worktree/.task-done" "$worktree/TASK.md"
+  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+    git add -A
+    git commit -m "Clean up task files" --no-verify 2>&1 >> "$LOG_FILE" || true
+  fi
+
+  # Push branch
+  local branch
+  branch=$(task_field "$id" "branch")
+  git push -u origin "$branch" 2>&1 | tail -5 >> "$LOG_FILE" || true
+  log "Pushed branch $branch"
+
+  # Create PR
+  local description pr_url
+  description=$(task_field "$id" "description")
+  pr_url=$(gh pr create \
+    --title "$description" \
+    --body "Automated task completed by dev-task-runner." \
+    --head "$branch" 2>&1) || true
+
+  if echo "$pr_url" | grep -q "https://"; then
+    pr_url=$(echo "$pr_url" | grep -oP 'https://\S+' | head -1)
+    update_task "$id" "pr_url" "$pr_url"
+    log "PR created: $pr_url"
+  else
+    log "WARNING: PR creation may have failed: $pr_url"
+  fi
+
+  # Mark done
+  local now
+  now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  local tmp="$TASK_REGISTRY.tmp.$$"
+  jq --arg id "$id" --arg now "$now" \
+    '(.tasks[] | select(.id == $id)) |= (.status = "done" | .completed = $now)' \
+    "$TASK_REGISTRY" > "$tmp" && mv "$tmp" "$TASK_REGISTRY"
+
+  log "Task $id marked as done"
+}
+
+# ── Single pass ──────────────────────────────────────────────────────────────
+
+run_once() {
+  process_pending
+  check_running
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+case "${1:---once}" in
+  --once)
+    log "Running single pass..."
+    run_once
+    log "Pass complete."
+    ;;
+  --watch)
+    log "Starting watch mode (polling every 60s)..."
+    while true; do
+      run_once
+      sleep 60
+    done
+    ;;
+  *)
+    echo "Usage: dev-task-runner [--once|--watch]"
+    exit 1
+    ;;
+esac
