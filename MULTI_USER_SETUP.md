@@ -78,6 +78,7 @@ dev ls                          # list your sessions
 - **tmux**: Sessions persist after disconnect. Reconnect with `dev attach <session>`
 - **Shell customization**: Users can edit their own `~/.bashrc` freely — Homebrew and nvm are already sourced
 - **Shared secrets**: API keys and env files are symlinked from `/etc/dev-cli/secrets/` into each user's config automatically
+- **Mobile access**: Install Tailscale and [Termius](https://termius.com/) on your phone to SSH into the server from anywhere
 
 ## Troubleshooting
 
