@@ -1414,7 +1414,10 @@ cmd_kill() {
 
   # Delete the local branch so the same branch name can be reused with dev new.
   # Remote branch is untouched — only the local ref is removed.
-  if [ -n "$branch" ]; then
+  # Skip for ask sessions (they use detached HEAD, no local branch to delete).
+  local session_type
+  session_type=$(get_session_field "$name" "type")
+  if [ -n "$branch" ] && [ "$session_type" != "ask" ]; then
     if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
       # Try safe delete first (fails if branch has unmerged/unpushed commits)
       if git branch -d "$branch" 2>/dev/null; then
@@ -3644,6 +3647,161 @@ cmd_task() {
   esac
 }
 
+cmd_ask() {
+  local project="${2:-}" prompt="" agent="claude" print_mode=false yolo=false
+  shift 2 || true
+
+  # Parse options
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --agent) agent="${2:-claude}"; shift 2 ;;
+      --agent=*) agent="${1#*=}"; shift ;;
+      --print) print_mode=true; shift ;;
+      --yolo) yolo=true; shift ;;
+      *)
+        # Collect remaining args as the prompt
+        if [ -z "$prompt" ]; then
+          prompt="$1"
+        else
+          prompt="$prompt $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [ -z "$project" ] && die "Usage: dev ask <project> [prompt] [--agent claude|codex] [--print] [--yolo]"
+
+  local bare_dir="$PROJECTS_DIR/$project"
+  [ -d "$bare_dir" ] || die "Project '$project' not found. Run 'dev setup $project <url>' first."
+
+  # Resolve yolo from project config
+  if [ "$yolo" != true ] && [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
+    local config_yolo
+    config_yolo=$(jq -r '.skip_permissions // false' "$CONFIG_DIR/projects/${project}.json" 2>/dev/null)
+    [ "$config_yolo" = "true" ] && yolo=true
+  fi
+
+  # Create a temporary worktree from the main branch
+  local base_branch
+  cd "$bare_dir"
+  base_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo "main")
+
+  local ts
+  ts=$(date +%s)
+  local slug="ask-${ts}"
+  local wt_dir="$PROJECTS_DIR/${project}-worktrees"
+  local tmp_path="$wt_dir/.ask-$ts"
+  local name="${USER}-${project}-${slug}"
+
+  # Check for existing ask session
+  [ -z "$(get_session "$name")" ] || die "Session '$name' already exists."
+
+  mkdir -p "$wt_dir"
+  info "Creating temporary worktree from $base_branch..."
+  git fetch origin --prune 2>/dev/null || true
+  git worktree add "$tmp_path" "origin/$base_branch" --detach 2>/dev/null \
+    || die "Failed to create temporary worktree"
+
+  log "Temporary worktree ready"
+
+  # --print mode: run agent non-interactively, print result, clean up
+  if [ "$print_mode" = true ] && [ -n "$prompt" ]; then
+    info "Asking Claude: $prompt"
+    echo ""
+    local env_prefix=""
+    [ -f "$SECRETS_FILE" ] && env_prefix="source $SECRETS_FILE && "
+    cd "$tmp_path"
+    eval "${env_prefix}claude --print \"\$prompt\"" || true
+    echo ""
+    info "Cleaning up temporary worktree..."
+    cd "$bare_dir"
+    git worktree remove "$tmp_path" --force 2>/dev/null || true
+    log "Done"
+    return 0
+  fi
+
+  # Register in port registry (no slot or ports — lightweight session)
+  local agents_json
+  agents_json=$(echo "$agent" | jq -R . | jq -s .)
+  (
+    flock -x 200
+    local tmp
+    tmp=$(mktemp)
+    jq --arg name "$name" \
+       --arg project "$project" \
+       --arg branch "$base_branch" \
+       --arg agent "$agent" \
+       --argjson agents "$agents_json" \
+       --arg path "$tmp_path" \
+       --arg owner "$USER" \
+       --arg created "$(date -Iseconds)" \
+       '.[$name] = {
+          project: $project,
+          branch: $branch,
+          slot: 0,
+          agent: $agent,
+          agents: $agents,
+          path: $path,
+          owner: $owner,
+          type: "ask",
+          ports: {
+            frontend: null,
+            backend: null,
+            supa_api: null,
+            supa_db: null,
+            supa_studio: null
+          },
+          created: $created
+        }' "$PORT_REGISTRY" > "$tmp"
+    mv "$tmp" "$PORT_REGISTRY"
+    fix_registry_perms
+  ) 200>"${PORT_REGISTRY}.lock"
+
+  # Source secrets
+  local env_prefix=""
+  if [ -f "$SECRETS_FILE" ]; then
+    env_prefix="source $SECRETS_FILE && "
+  fi
+
+  # Build agent command
+  local claude_flags=""
+  [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
+
+  local agent_cmd
+  case "$agent" in
+    claude)
+      if [ -n "$prompt" ]; then
+        agent_cmd="cd $tmp_path && claude${claude_flags} \"$prompt\""
+      else
+        agent_cmd="cd $tmp_path && claude${claude_flags}"
+      fi
+      ;;
+    codex)
+      agent_cmd="cd $tmp_path && codex"
+      ;;
+    *)
+      die "Unknown agent: $agent. Use claude or codex."
+      ;;
+  esac
+
+  # Create tmux session with agent + shell (no server window)
+  tmux new-session -d -s "$name" -n "agent" "${env_prefix}${agent_cmd}"
+  tmux new-window -t "$name" -n "shell" "cd $tmp_path && bash"
+  tmux select-window -t "$name:1"
+
+  log "Ask session '$name' is running!"
+  echo ""
+  echo -e "  ${BOLD}Session:${NC}  $name"
+  echo -e "  ${BOLD}Agent:${NC}    $agent"
+  echo -e "  ${BOLD}Project:${NC}  $project ($base_branch)"
+  echo -e "  ${BOLD}Type:${NC}     ask ${DIM}(read-only, no ports)${NC}"
+  echo ""
+  echo -e "  ${DIM}Attach:    dev attach $name${NC}"
+  echo -e "  ${DIM}Kill:      dev kill $name${NC}"
+  echo ""
+}
+
 cmd_help() {
   cat << 'HELPEOF'
 
@@ -3675,6 +3833,10 @@ cmd_help() {
     dev diff <session>                      Show git diff --stat for session
     dev diff <session> --full               Show full git diff
     dev sync <session>                      Rebase session on upstream base branch
+    dev ask <project> [prompt]              Ask AI about the code (lightweight session, no ports)
+                                            --agent claude|codex (default: claude)
+                                            --print  One-shot answer, no tmux session
+                                            --yolo   Skip permissions (Claude only)
     dev hub                                 Interactive TUI control center
     dev dashboard                           Split-pane view of all agents (read-only)
 
@@ -3776,6 +3938,8 @@ cmd_help() {
     dev new klyra feat/trading-ui --agent claude
     dev new klyra feat/trading-ui --yolo
     dev new klyra fix/auth-bug --agents claude,codex
+    dev ask klyra "how does the auth flow work?"
+    dev ask klyra                                # interactive session
     dev agent add klyra-feat-trading-ui codex
     dev ls
     dev attach klyra-feat-trading-ui
@@ -3831,6 +3995,7 @@ case "${1:-help}" in
   services)  cmd_services "$@" ;;
   task)      cmd_task "$@" ;;
   notify)    cmd_notify "$@" ;;
+  ask)       cmd_ask "$@" ;;
   mobile|m)  cmd_mobile ;;
   help|-h|--help) cmd_help ;;
   *)         die "Unknown command: $1. Run 'dev help' for usage." ;;
