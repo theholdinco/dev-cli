@@ -586,8 +586,7 @@ if [ -d "$WEB_DIR" ] && [ -f "$WEB_DIR/requirements.txt" ]; then
 
   # Install systemd services (auto-start on boot)
   info "Installing systemd services..."
-  "$BIN_DIR/dev" services install 2>/dev/null || \
-    "$HOME/.local/bin/dev" services install 2>/dev/null || \
+  "$HOME/.local/bin/dev" services install 2>/dev/null || \
     warn "Could not install services automatically. Run 'dev services install' after login."
 else
   warn "Web dashboard files not found — run install.sh first, then 'dev services install'"
