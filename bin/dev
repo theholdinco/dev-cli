@@ -2727,7 +2727,7 @@ cmd_projects() {
 }
 
 cmd_update() {
-  local GITHUB_REPO="GonzaDDV/dev-cli"
+  local GITHUB_REPO="Patagon-Markets/dev-cli"
   local BRANCH="${1:-main}"
   local TARBALL_URL="https://github.com/${GITHUB_REPO}/archive/refs/heads/${BRANCH}.tar.gz"
 
