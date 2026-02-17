@@ -968,7 +968,7 @@ cmd_setup() {
 }
 
 cmd_new() {
-  local project="${2:-}" branch="${3:-}" agent="" agents_flag="" run_cmd="" yolo=false attach=false
+  local project="${2:-}" branch="${3:-}" agent="" agents_flag="" run_cmd="" yolo=false attach=false from_branch=""
   shift 2 || true
 
   # Parse options
@@ -980,6 +980,8 @@ cmd_new() {
       --agents=*) agents_flag="${1#*=}"; shift ;;
       --run) run_cmd="${2:-}"; shift 2 ;;
       --run=*) run_cmd="${1#*=}"; shift ;;
+      --from) from_branch="${2:-}"; shift 2 ;;
+      --from=*) from_branch="${1#*=}"; shift ;;
       --yolo) yolo=true; shift ;;
       --attach) attach=true; shift ;;
       *) shift ;;
@@ -1010,8 +1012,8 @@ cmd_new() {
     [ "$config_yolo" = "true" ] && yolo=true
   fi
 
-  [ -z "$project" ] && die "Usage: dev new <project> <branch> [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach]"
-  [ -z "$branch" ] && die "Usage: dev new <project> <branch> [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach]"
+  [ -z "$project" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach]"
+  [ -z "$branch" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach]"
 
   local bare_dir="$PROJECTS_DIR/$project"
   local wt_dir="$PROJECTS_DIR/${project}-worktrees"
@@ -1035,7 +1037,23 @@ cmd_new() {
   cd "$bare_dir"
   git fetch origin --prune
 
-  if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null || \
+  if [ -n "$from_branch" ]; then
+    # User specified a base branch with --from
+    # Validate the base branch exists
+    if ! git show-ref --verify --quiet "refs/heads/$from_branch" 2>/dev/null && \
+       ! git show-ref --verify --quiet "refs/remotes/origin/$from_branch" 2>/dev/null; then
+      die "Base branch '$from_branch' not found locally or on origin."
+    fi
+    local from_ref="origin/$from_branch"
+    git show-ref --verify --quiet "refs/remotes/origin/$from_branch" 2>/dev/null || from_ref="$from_branch"
+    info "Branch '$branch' will be based on $from_ref"
+    if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+      # Branch already exists locally, just check it out
+      git worktree add "$worktree_path" "$branch"
+    else
+      git worktree add "$worktree_path" -b "$branch" "$from_ref"
+    fi
+  elif git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null || \
      git show-ref --verify --quiet "refs/remotes/origin/$branch" 2>/dev/null; then
     # Branch exists
     git worktree add "$worktree_path" "$branch" 2>/dev/null || \
@@ -3772,12 +3790,30 @@ cmd_task() {
 
   case "$subcmd" in
     add)
-      local project="${3:-}"
-      local branch="${4:-}"
-      local description="${5:-}"
-      [ -n "$project" ] || die "Usage: dev task add <project> <branch> \"description\""
-      [ -n "$branch" ] || die "Usage: dev task add <project> <branch> \"description\""
-      [ -n "$description" ] || die "Usage: dev task add <project> <branch> \"description\""
+      local project="" branch="" description="" from_branch=""
+      shift 2  # skip "task add"
+
+      # Parse positional args and flags
+      while [[ $# -gt 0 ]]; do
+        case "${1:-}" in
+          --from) from_branch="${2:-}"; shift 2 ;;
+          --from=*) from_branch="${1#*=}"; shift ;;
+          *)
+            if [ -z "$project" ]; then
+              project="$1"
+            elif [ -z "$branch" ]; then
+              branch="$1"
+            elif [ -z "$description" ]; then
+              description="$1"
+            fi
+            shift
+            ;;
+        esac
+      done
+
+      [ -n "$project" ] || die "Usage: dev task add <project> <branch> \"description\" [--from <base>]"
+      [ -n "$branch" ] || die "Usage: dev task add <project> <branch> \"description\" [--from <base>]"
+      [ -n "$description" ] || die "Usage: dev task add <project> <branch> \"description\" [--from <base>]"
 
       # Validate project exists
       [ -d "$CONFIG_DIR/projects" ] && [ -f "$CONFIG_DIR/projects/${project}.json" ] \
@@ -3790,11 +3826,13 @@ cmd_task() {
 
       jq --arg id "$id" --arg proj "$project" --arg br "$branch" \
          --arg desc "$description" --arg now "$now" \
+         --arg from "$from_branch" \
         '.tasks += [{
           id: $id,
           project: $proj,
           branch: $br,
           description: $desc,
+          from_branch: (if $from == "" then null else $from end),
           status: "pending",
           session: null,
           pr_url: null,
@@ -3803,7 +3841,11 @@ cmd_task() {
           completed: null
         }] | .next_id = (.next_id + 1)' "$TASK_REGISTRY" > "$tmp" && mv "$tmp" "$TASK_REGISTRY"
 
-      log "Task #$id added: $project/$branch — $description"
+      if [ -n "$from_branch" ]; then
+        log "Task #$id added: $project/$branch (from $from_branch) — $description"
+      else
+        log "Task #$id added: $project/$branch — $description"
+      fi
       ;;
     ls|list)
       if ! jq -e '.tasks | length > 0' "$TASK_REGISTRY" &>/dev/null; then
@@ -3961,7 +4003,7 @@ cmd_task() {
     *)
       echo "Usage: dev task <add|ls|rm|prune|run|watch|log>"
       echo ""
-      echo "  add <project> <branch> \"desc\"  Add a task to the queue"
+      echo "  add <project> <branch> \"desc\" [--from <base>]  Add a task to the queue"
       echo "  ls [--pending|--running|...]    List tasks (filter by status)"
       echo "  rm <id>                        Remove a task"
       echo "  prune [--failed|--all-finished] [--dry-run]"
@@ -4513,8 +4555,9 @@ cmd_help() {
     dev help                                Show this help
 
   SESSIONS
-    dev new <project> <branch> [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--run "<cmd>"]
+    dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--run "<cmd>"]
                                             Create worktree + start agent(s)
+                                            --from base the new branch off a specific branch (instead of main)
                                             --agents starts multiple agents (comma-separated)
                                             --yolo launches Claude with --dangerously-skip-permissions
                                             --attach auto-attach to the session after creation
@@ -4614,7 +4657,9 @@ cmd_help() {
     dev bot status                          Show bot status
 
   TASKS (automated task queue)
-    dev task add <project> <branch> "desc"  Add a task to the queue
+    dev task add <project> <branch> "desc" [--from <base>]
+                                            Add a task to the queue
+                                            --from base the worktree off a specific branch
     dev task ls [--pending|--running|--done|--failed|--pr-created|--all]
                                             List tasks (filterable by status)
     dev task rm <id>                        Remove a task

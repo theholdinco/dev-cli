@@ -115,11 +115,12 @@ process_pending() {
   task_json=$(jq -r '.tasks[] | select(.status == "pending") | @json' "$TASK_REGISTRY" | head -1)
   [ -n "$task_json" ] || return 0
 
-  local id project branch description
+  local id project branch description from_branch
   id=$(echo "$task_json" | jq -r '.id')
   project=$(echo "$task_json" | jq -r '.project')
   branch=$(echo "$task_json" | jq -r '.branch')
   description=$(echo "$task_json" | jq -r '.description')
+  from_branch=$(echo "$task_json" | jq -r '.from_branch // empty')
 
   log "Processing task $id: $project/$branch — $description"
 
@@ -133,7 +134,9 @@ process_pending() {
 
   # Create session via dev new
   local dev_output session_name
-  dev_output=$(dev new "$project" "$branch" --agent claude --yolo 2>&1) || true
+  local from_flag=""
+  [ -n "$from_branch" ] && from_flag="--from $from_branch"
+  dev_output=$(dev new "$project" "$branch" $from_flag --agent claude --yolo 2>&1) || true
   # Strip ANSI codes before parsing
   session_name=$(echo "$dev_output" | sed 's/\x1b\[[0-9;]*m//g' | grep -oP 'Session:\s+\K\S+' | head -1)
 
