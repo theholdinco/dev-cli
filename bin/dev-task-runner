@@ -84,19 +84,26 @@ send_telegram() {
 
 notify_pr_ready() {
   local id="$1" pr_url="$2"
-  local project branch description
+  local project branch description from_branch
   project=$(task_field "$id" "project")
   branch=$(task_field "$id" "branch")
   description=$(task_field "$id" "description")
+  from_branch=$(task_field "$id" "from_branch")
 
   local hostname
   hostname=$(hostname 2>/dev/null || echo "unknown")
+
+  local from_line=""
+  if [ -n "$from_branch" ] && [ "$from_branch" != "null" ]; then
+    from_line="
+🔀 *Based on:* \`${from_branch}\`"
+  fi
 
   local text="🔔 *PR Ready for Review*
 
 📋 *Task #${id}:* ${description}
 📦 *Project:* \`${project}\`
-🌿 *Branch:* \`${branch}\`
+🌿 *Branch:* \`${branch}\`${from_line}
 🖥 *Host:* \`${hostname}\`
 
 🔗 [Review PR](${pr_url})"
@@ -207,6 +214,24 @@ TASKEOF
   dev send "$session_name" "$prompt" 2>&1 | head -5 >> "$LOG_FILE" || true
 
   log "Sent prompt to $session_name for task $id"
+
+  # Notify via Telegram that task has started
+  local hostname
+  hostname=$(hostname 2>/dev/null || echo "unknown")
+
+  local from_line=""
+  if [ -n "$from_branch" ]; then
+    from_line="
+🔀 *Based on:* \`${from_branch}\`"
+  fi
+
+  send_telegram "🚀 *Task Started*
+
+📋 *Task #${id}:* ${description}
+📦 *Project:* \`${project}\`
+🌿 *Branch:* \`${branch}\`${from_line}
+🖥 *Host:* \`${hostname}\`
+🤖 *Session:* \`${session_name}\`"
 }
 
 # ── Check running tasks ─────────────────────────────────────────────────────

@@ -29,6 +29,13 @@
         </div>
 
         <div>
+            <label for="from_branch" class="block text-sm font-medium text-gray-300 mb-1">Base Branch <span class="text-gray-500">(optional)</span></label>
+            <input type="text" name="from_branch" id="from_branch" placeholder="main"
+                   class="w-full bg-gray-800 border border-gray-600 text-gray-200 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 font-mono">
+            <p class="mt-1 text-xs text-gray-500">Leave empty to use the default branch. Use this to base the worktree off a specific branch.</p>
+        </div>
+
+        <div>
             <label for="description" class="block text-sm font-medium text-gray-300 mb-1">Task Description</label>
             <textarea name="description" id="description" required rows="4"
                       placeholder="Describe what Claude should implement..."

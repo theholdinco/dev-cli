@@ -169,9 +169,15 @@ def format_task(task: TaskInfo) -> str:
         "",
         f"\U0001f4c1 Project: {mono(task.project)}",
         f"\U0001f33f Branch: {mono(task.branch)}",
+    ]
+
+    if task.from_branch:
+        lines.append(f"\U0001f500 Based on: {mono(task.from_branch)}")
+
+    lines.extend([
         f"\U0001f4dd Status: {escape_md(task.status)}",
         f"\U0001f4ac {escape_md(task.description)}",
-    ]
+    ])
 
     if task.session:
         lines.append(f"\U0001f4bb Session: {mono(task.session)}")
