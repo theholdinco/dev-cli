@@ -224,12 +224,12 @@ All other dependencies are installed by `bootstrap.sh`.
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+a d` | Detach (session keeps running) |
-| `Ctrl+a s` | Switch between sessions |
-| `Ctrl+a 1/2/3` | Switch window (agent/shell/server) |
-| `Ctrl+a z` | Zoom pane (fullscreen toggle) |
-| `Ctrl+a \|` | Split vertically |
-| `Ctrl+a -` | Split horizontally |
+| `Ctrl+b d` | Detach (session keeps running) |
+| `Ctrl+b s` | Switch between sessions |
+| `Ctrl+b 1/2/3` | Switch window (agent/shell/server) |
+| `Ctrl+b z` | Zoom pane (fullscreen toggle) |
+| `Ctrl+b \|` | Split vertically |
+| `Ctrl+b -` | Split horizontally |
 | `Alt+↑↓←→` | Move between panes |
 
 ## Contributing
