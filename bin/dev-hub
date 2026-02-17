@@ -429,6 +429,10 @@ action_new() {
   [ -z "$branch_input" ] && return
 
   echo ""
+  echo -e "  ${DIM}Base branch (leave empty for default/main):${NC}"
+  read -rp "  Base branch (--from): " from_input
+
+  echo ""
   echo "  Agent(s):"
   echo "    1) claude (default)"
   echo "    2) codex"
@@ -446,8 +450,14 @@ action_new() {
   echo ""
   echo -e "  ${BLUE}→${NC} Creating session..."
 
+  # Build from flag if specified
+  local from_args=()
+  if [ -n "$from_input" ]; then
+    from_args=(--from "$from_input")
+  fi
+
   # Run dev new in a way that we can see the output
-  dev new "$project_input" "$branch_input" "$agent_flag" "$agent" 2>&1
+  dev new "$project_input" "$branch_input" "${from_args[@]}" "$agent_flag" "$agent" 2>&1
 
   echo ""
   read -rp "  Press Enter to return to hub..." _
