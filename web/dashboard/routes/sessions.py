@@ -23,10 +23,11 @@ def new_session_form():
 def create_session():
     project = request.form.get("project", "")
     branch = request.form.get("branch", "")
+    from_branch = request.form.get("from_branch", "").strip()
     agent_type = request.form.get("agent_type", "claude")
     yolo = request.form.get("yolo") == "on"
 
-    result = new_session(project=project, branch=branch, agent=agent_type, yolo=yolo)
+    result = new_session(project=project, branch=branch, agent=agent_type, yolo=yolo, from_branch=from_branch)
     if result.success:
         flash(f"Session created for {project}/{branch}", "success")
     else:

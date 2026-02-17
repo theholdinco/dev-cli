@@ -22,7 +22,7 @@ HELP_TEXT = """Available commands:
 /ls \\- List active sessions
 /ls all \\- List all sessions
 /status \\<session\\> \\- Session details
-/new \\<project\\> \\<branch\\> \\[agent\\] \\[\\-\\-yolo\\] \\- Create session
+/new \\<project\\> \\<branch\\> \\[agent\\] \\[\\-\\-from base\\] \\[\\-\\-yolo\\] \\- Create session
 /kill \\<session\\> \\- Kill session
 /restart \\<session\\> \\- Restart session
 
@@ -82,26 +82,37 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @authorized
 async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /new <project> <branch> [agent] [--yolo] command."""
+    """Handle /new <project> <branch> [agent] [--from base] [--yolo] command."""
     if not context.args or len(context.args) < 2:
-        await update.message.reply_text("Usage: /new <project> <branch> [agent] [--yolo]")
+        await update.message.reply_text("Usage: /new <project> <branch> [agent] [--from base] [--yolo]")
         return
 
     project = context.args[0]
     branch = context.args[1]
     agent = "claude"
     yolo = False
+    from_branch = ""
 
     remaining = context.args[2:]
-    for arg in remaining:
+    i = 0
+    while i < len(remaining):
+        arg = remaining[i]
         if arg == "--yolo":
             yolo = True
+        elif arg == "--from" and i + 1 < len(remaining):
+            i += 1
+            from_branch = remaining[i]
         elif arg in ("claude", "codex"):
             agent = arg
+        i += 1
 
-    await update.message.reply_text(f"Creating session {project}/{branch} with {agent}...")
+    msg = f"Creating session {project}/{branch}"
+    if from_branch:
+        msg += f" (from {from_branch})"
+    msg += f" with {agent}..."
+    await update.message.reply_text(msg)
 
-    result = new_session(project, branch, agent=agent, yolo=yolo)
+    result = new_session(project, branch, agent=agent, yolo=yolo, from_branch=from_branch)
 
     if result.success:
         output = result.output.strip() if result.output else "Session created."

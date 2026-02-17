@@ -27,13 +27,14 @@ def new_task_form():
 def create_task():
     project = request.form.get("project", "")
     branch = request.form.get("branch", "")
+    from_branch = request.form.get("from_branch", "").strip()
     description = request.form.get("description", "")
 
     if not project or not branch or not description:
         flash("All fields are required.", "error")
         return redirect(url_for("tasks.new_task_form"))
 
-    task = add_task(project=project, branch=branch, description=description)
+    task = add_task(project=project, branch=branch, description=description, from_branch=from_branch)
     flash(f"Task #{task.id} added: {project}/{branch}", "success")
     return redirect(url_for("tasks.list_tasks_view"))
 

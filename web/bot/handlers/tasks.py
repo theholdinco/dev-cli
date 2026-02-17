@@ -19,18 +19,37 @@ async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @authorized
 async def cmd_task_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /task_add <project> <branch> <description>."""
+    """Handle /task_add <project> <branch> <description> [--from base]."""
     if not context.args or len(context.args) < 3:
         await update.message.reply_text(
-            "Usage: /task_add <project> <branch> <description>"
+            "Usage: /task_add <project> <branch> <description> [--from base]"
         )
         return
 
     project = context.args[0]
     branch = context.args[1]
-    description = " ".join(context.args[2:])
+    remaining = context.args[2:]
 
-    task = add_task(project=project, branch=branch, description=description)
+    # Parse --from flag from remaining args
+    from_branch = ""
+    desc_parts = []
+    i = 0
+    while i < len(remaining):
+        if remaining[i] == "--from" and i + 1 < len(remaining):
+            i += 1
+            from_branch = remaining[i]
+        else:
+            desc_parts.append(remaining[i])
+        i += 1
+    description = " ".join(desc_parts)
+
+    if not description:
+        await update.message.reply_text(
+            "Usage: /task_add <project> <branch> <description> [--from base]"
+        )
+        return
+
+    task = add_task(project=project, branch=branch, description=description, from_branch=from_branch)
     text = format_task(task)
     await update.message.reply_text(truncate(text), parse_mode="MarkdownV2")
 

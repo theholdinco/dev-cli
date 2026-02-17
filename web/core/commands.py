@@ -50,10 +50,13 @@ def run_dev(args: list[str], timeout: int = 60, stdin_data: str = None) -> Comma
 
 
 def new_session(
-    project: str, branch: str, agent: str = "claude", yolo: bool = False
+    project: str, branch: str, agent: str = "claude", yolo: bool = False, from_branch: str = ""
 ) -> CommandResult:
-    """Create a new session: dev new <project> <branch> [--agent type] [--yolo]."""
-    args = ["new", project, branch, "--agent", agent]
+    """Create a new session: dev new <project> <branch> [--from base] [--agent type] [--yolo]."""
+    args = ["new", project, branch]
+    if from_branch:
+        args.extend(["--from", from_branch])
+    args.extend(["--agent", agent])
     if yolo:
         args.append("--yolo")
     return run_dev(args)
@@ -124,9 +127,12 @@ def run_doctor() -> CommandResult:
     return run_dev(["doctor"])
 
 
-def task_add(project: str, branch: str, description: str) -> CommandResult:
-    """Add a task: dev task add <project> <branch> <description>."""
-    return run_dev(["task", "add", project, branch, description])
+def task_add(project: str, branch: str, description: str, from_branch: str = "") -> CommandResult:
+    """Add a task: dev task add <project> <branch> <description> [--from base]."""
+    args = ["task", "add", project, branch, description]
+    if from_branch:
+        args.extend(["--from", from_branch])
+    return run_dev(args)
 
 
 def task_remove(task_id: str) -> CommandResult:

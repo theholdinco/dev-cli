@@ -19,6 +19,7 @@ class TaskInfo:
     branch: str
     description: str
     status: str  # pending, running, done, failed
+    from_branch: Optional[str] = None
     session: Optional[str] = None
     pr_url: Optional[str] = None
     created: str = ""
@@ -53,6 +54,7 @@ def _task_from_dict(d: dict) -> TaskInfo:
         branch=d.get("branch", ""),
         description=d.get("description", ""),
         status=d.get("status", "pending"),
+        from_branch=d.get("from_branch"),
         session=d.get("session"),
         pr_url=d.get("pr_url"),
         created=d.get("created", ""),
@@ -75,7 +77,7 @@ def get_task(task_id: str) -> Optional[TaskInfo]:
     return None
 
 
-def add_task(project: str, branch: str, description: str) -> TaskInfo:
+def add_task(project: str, branch: str, description: str, from_branch: str = "") -> TaskInfo:
     """Add a new task and return it."""
     data = _read_registry()
     task_id = str(data.get("next_id", 1))
@@ -86,6 +88,7 @@ def add_task(project: str, branch: str, description: str) -> TaskInfo:
         "project": project,
         "branch": branch,
         "description": description,
+        "from_branch": from_branch or None,
         "status": "pending",
         "session": None,
         "pr_url": None,
