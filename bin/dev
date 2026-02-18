@@ -567,7 +567,7 @@ cmd_init() {
   local url=""
   if [ ! -d "$PROJECTS_DIR/$project" ]; then
     while [ -z "$url" ]; do
-      read -rp "  GitHub SSH URL (e.g. git@github.com:org/repo.git): " url
+      read -rp "  GitHub URL (SSH or HTTPS, e.g. git@github.com:org/repo.git): " url
       if [ -z "$url" ]; then
         warn "URL cannot be empty"
       elif [[ ! "$url" =~ ^git@|^https:// ]]; then
@@ -933,8 +933,8 @@ PCONF
 
 cmd_setup() {
   local project="${2:-}" url="${3:-}"
-  [ -z "$project" ] && die "Usage: dev setup <project> <github-ssh-url>"
-  [ -z "$url" ] && die "Usage: dev setup <project> <github-ssh-url>"
+  [ -z "$project" ] && die "Usage: dev setup <project> <git-url>"
+  [ -z "$url" ] && die "Usage: dev setup <project> <git-url>"
 
   local bare_dir="$PROJECTS_DIR/$project"
   local wt_dir="$PROJECTS_DIR/${project}-worktrees"
@@ -4711,7 +4711,8 @@ cmd_help() {
 
   EXAMPLES
     dev init                                 # interactive setup for new project
-    dev setup klyra git@github.com:org/klyra.git
+    dev setup klyra git@github.com:org/klyra.git   # SSH
+    dev setup klyra https://github.com/org/klyra.git  # HTTPS
     dev new klyra feat/trading-ui --agent claude
     dev new klyra feat/trading-ui --yolo
     dev new klyra fix/auth-bug --agents claude,codex
