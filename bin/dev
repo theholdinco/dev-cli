@@ -285,11 +285,11 @@ slugify() {
 }
 
 # Session name: user-project-branch
-# For task branches (task-N/...), use only "task-N" to keep names short
+# For task branches (task-N or task-N/...), use only "task-N" to keep names short
 session_name() {
   local project="$1" branch="$2"
   local slug
-  if [[ "$branch" =~ ^task-[0-9]+/ ]]; then
+  if [[ "$branch" =~ ^task-[0-9]+(/|$) ]]; then
     slug="${branch%%/*}"
   else
     slug=$(slugify "$branch")
@@ -3911,7 +3911,7 @@ cmd_task() {
       if [ -z "$branch" ]; then
         local id_for_branch
         id_for_branch=$(jq -r '.next_id' "$TASK_REGISTRY")
-        branch="task-${id_for_branch}/$(echo "$description" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//' | cut -c1-50)"
+        branch="task-${id_for_branch}"
         info "Auto-generated branch: $branch"
       fi
 
