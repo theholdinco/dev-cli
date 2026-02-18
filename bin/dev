@@ -4212,7 +4212,7 @@ cmd_ghost() {
   [ -z "$(get_session "$name")" ] || die "Session '$name' already exists."
 
   # Create a persistent working directory (no repo)
-  local ghost_dir="$CONFIG_DIR/ghost/${name}"
+  local ghost_dir="$HOME/ghost/${name}"
   mkdir -p "$ghost_dir"
 
   # Register in port registry (no slot, no ports, no project)
