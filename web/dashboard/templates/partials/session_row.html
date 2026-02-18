@@ -13,6 +13,12 @@
                 </span>
             </div>
             <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-400">
+                {% if session.owner %}
+                    <a href="{{ url_for('sessions.list_sessions_view', user=session.owner) }}"
+                       class="inline-flex items-center px-1.5 py-0.5 rounded text-xs bg-indigo-900/50 text-indigo-400 border border-indigo-800 hover:bg-indigo-900/80 transition-colors">
+                        {{ session.owner }}
+                    </a>
+                {% endif %}
                 <span>{{ session.project }}</span>
                 <span class="font-mono">{{ session.branch }}</span>
                 <span>Slot {{ session.slot }}</span>

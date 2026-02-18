@@ -23,6 +23,7 @@ def ports_view():
         {
             "name": p["name"],
             "slot": p["slot"],
+            "owner": p.get("owner", ""),
             "frontend": p["frontend_port"],
             "backend": p["backend_port"],
             "status": "alive" if p["alive"] else "dead",

@@ -75,7 +75,7 @@ def get_system_info() -> dict:
 
 
 def get_port_table() -> list[dict]:
-    """Return a list of dicts with name, slot, frontend_port, backend_port, alive — sorted by slot."""
+    """Return a list of dicts with name, slot, owner, frontend_port, backend_port, alive — sorted by slot."""
     sessions = list_sessions(show_all=True)
     table = []
     for s in sessions:
@@ -83,6 +83,7 @@ def get_port_table() -> list[dict]:
         table.append({
             "name": s.name,
             "slot": s.slot,
+            "owner": s.owner,
             "frontend_port": ports.get("frontend", 0),
             "backend_port": ports.get("backend", 0),
             "alive": s.alive,

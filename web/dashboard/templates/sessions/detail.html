@@ -45,6 +45,17 @@
         <dd class="text-lg font-medium text-white mt-1 font-mono">{{ session.branch }}</dd>
     </div>
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <dt class="text-sm text-gray-400">Owner</dt>
+        <dd class="text-lg font-medium mt-1">
+            {% if session.owner %}
+                <a href="{{ url_for('sessions.list_sessions_view', user=session.owner) }}"
+                   class="text-indigo-400 hover:text-indigo-300">{{ session.owner }}</a>
+            {% else %}
+                <span class="text-gray-500">Unknown</span>
+            {% endif %}
+        </dd>
+    </div>
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
         <dt class="text-sm text-gray-400">Slot</dt>
         <dd class="text-lg font-medium text-white mt-1">{{ session.slot }}</dd>
     </div>
