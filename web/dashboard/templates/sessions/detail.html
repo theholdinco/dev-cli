@@ -18,6 +18,12 @@
         </span>
     </div>
     <div class="flex items-center space-x-2">
+        <button hx-post="{{ url_for('sessions.toggle_private_view', name=session.name) }}"
+                hx-target="body"
+                hx-swap="outerHTML"
+                class="{% if session.private %}bg-yellow-600 hover:bg-yellow-500{% else %}bg-gray-600 hover:bg-gray-500{% endif %} text-white text-sm px-3 py-1.5 rounded-md transition-colors">
+            {{ "Private" if session.private else "Public" }}
+        </button>
         <button hx-post="{{ url_for('sessions.restart_session_view', name=session.name) }}"
                 hx-target="#flash"
                 hx-swap="innerHTML"

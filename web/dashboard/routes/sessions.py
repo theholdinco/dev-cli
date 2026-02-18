@@ -3,7 +3,7 @@ import os
 from flask import Blueprint, render_template, request, flash, redirect, url_for
 
 from core.sessions import list_sessions, get_session, get_users
-from core.commands import new_session, kill_session, restart_session
+from core.commands import new_session, kill_session, restart_session, run_dev
 from core.system import get_projects
 
 sessions_bp = Blueprint("sessions", __name__, url_prefix="/sessions")
@@ -66,6 +66,25 @@ def kill_session_view(name):
 
     flash(message, category)
     return redirect(url_for("sessions.list_sessions_view"))
+
+
+@sessions_bp.route("/<name>/private", methods=["POST"])
+def toggle_private_view(name):
+    session = get_session(name)
+    if session is None:
+        flash(f"Session '{name}' not found", "error")
+        return redirect(url_for("sessions.list_sessions_view"))
+
+    new_state = "off" if session.private else "on"
+    result = run_dev(["private", session.name, new_state])
+
+    if result.success:
+        label = "private" if new_state == "on" else "public"
+        flash(f"Session '{session.name}' is now {label}", "success")
+    else:
+        flash(f"Error toggling privacy: {result.error or result.output}", "error")
+
+    return redirect(url_for("sessions.session_detail", name=session.name))
 
 
 @sessions_bp.route("/<name>/restart", methods=["POST"])

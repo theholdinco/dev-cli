@@ -2308,6 +2308,52 @@ cmd_rename() {
   log "Renamed '$match' → '$new_name'"
 }
 
+cmd_private() {
+  local name="${2:-}" toggle="${3:-}"
+  [ -z "$name" ] && die "Usage: dev private <session> [on|off]"
+
+  # Partial match
+  local match
+  match=$(jq -r "keys[] | select(contains(\"$name\"))" "$PORT_REGISTRY" | head -1)
+  [ -z "$match" ] && die "No session matching '$name'"
+
+  # Determine new value
+  local new_val
+  if [ -z "$toggle" ]; then
+    # Toggle current value
+    local current
+    current=$(jq -r ".\"$match\".private // false" "$PORT_REGISTRY")
+    if [ "$current" = "true" ]; then
+      new_val=false
+    else
+      new_val=true
+    fi
+  elif [ "$toggle" = "on" ]; then
+    new_val=true
+  elif [ "$toggle" = "off" ]; then
+    new_val=false
+  else
+    die "Usage: dev private <session> [on|off]"
+  fi
+
+  # Update registry
+  (
+    flock -x 200
+    local tmp
+    tmp=$(mktemp)
+    jq --arg name "$match" --argjson val "$new_val" \
+      '.[$name].private = $val' "$PORT_REGISTRY" > "$tmp"
+    mv -f "$tmp" "$PORT_REGISTRY"
+    fix_registry_perms
+  ) 200>"${PORT_REGISTRY}.lock"
+
+  if [ "$new_val" = "true" ]; then
+    log "'$match' is now private (hidden from other users)"
+  else
+    log "'$match' is now public (visible to all users)"
+  fi
+}
+
 cmd_gc() {
   ensure_dirs
   local global=false
@@ -4701,6 +4747,7 @@ cmd_help() {
     dev diff <session>                      Show git diff --stat for session
     dev diff <session> --full               Show full git diff
     dev rename <session> [new-name]          Rename a session (interactive if no new name)
+    dev private <session> [on|off]          Toggle or set session privacy (hidden from other users)
     dev sync <session>                      Rebase session on upstream base branch
     dev ask <project> [prompt]              Ask AI about the code (lightweight session, no ports)
                                             --agent claude|codex (default: claude)
@@ -4883,6 +4930,7 @@ case "${1:-help}" in
   sync)      cmd_sync "$@" ;;
   gc)        cmd_gc "$@" ;;
   rename)    cmd_rename "$@" ;;
+  private)   cmd_private "$@" ;;
   template)  cmd_template "$@" ;;
   config)    cmd_config "$@" ;;
   agent)     cmd_agent "$@" ;;
