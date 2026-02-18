@@ -68,6 +68,9 @@ DEFAULT_CONFIG='{
   },
   "web": {
     "port": 8080
+  },
+  "ghost": {
+    "linked_dirs": []
   }
 }'
 
@@ -4253,10 +4256,19 @@ cmd_ghost() {
   local ghost_dir="$HOME/ghost/${name}"
   mkdir -p "$ghost_dir"
 
-  # Symlink ~/assembly into ghost dir so Claude can access it
-  if [ -d "$HOME/assembly" ] && [ ! -e "$ghost_dir/assembly" ]; then
-    ln -s "$HOME/assembly" "$ghost_dir/assembly"
-  fi
+  # Symlink configured directories into ghost dir
+  local linked_dirs
+  linked_dirs=$(jq -r '.ghost.linked_dirs // [] | .[]' "$GLOBAL_CONFIG" 2>/dev/null || true)
+  while IFS= read -r dir; do
+    [ -z "$dir" ] && continue
+    # Expand ~ to $HOME
+    dir="${dir/#\~/$HOME}"
+    local base
+    base=$(basename "$dir")
+    if [ -d "$dir" ] && [ ! -e "$ghost_dir/$base" ]; then
+      ln -s "$dir" "$ghost_dir/$base"
+    fi
+  done <<< "$linked_dirs"
 
   # Register in port registry (no slot, no ports, no project)
   local agents_json
@@ -4631,6 +4643,7 @@ cmd_help() {
                                             --agent claude|codex|none (default: claude)
                                             --name <label>  Custom session name
                                             --yolo   Skip permissions (Claude only)
+                                            Symlinks dirs from ghost.linked_dirs in config.json
     dev hub                                 Interactive TUI control center
     dev dashboard                           Split-pane view of all agents (read-only)
 
