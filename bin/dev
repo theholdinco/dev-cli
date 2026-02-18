@@ -4253,10 +4253,8 @@ cmd_ask() {
       ;;
   esac
 
-  # Create tmux session with agent + shell (no server window)
+  # Create tmux session with agent only (no shell window for ask sessions)
   tmux new-session -d -s "$name" -n "agent" "${env_prefix}${agent_cmd}"
-  tmux new-window -t "$name" -n "shell" "cd $tmp_path && bash"
-  tmux select-window -t "$name:1"
 
   log "Ask session '$name' is running!"
   echo ""
@@ -4376,10 +4374,8 @@ cmd_ghost() {
       ;;
   esac
 
-  # Create tmux session with agent + shell (no server window)
+  # Create tmux session with agent only (no shell window for ghost sessions)
   tmux new-session -d -s "$name" -n "agent" "${env_prefix}${agent_cmd}"
-  tmux new-window -t "$name" -n "shell" "cd $ghost_dir && bash"
-  tmux select-window -t "$name:1"
 
   log "Ghost session '$name' is running!"
   random_celebration
