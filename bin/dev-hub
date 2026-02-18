@@ -101,7 +101,7 @@ get_ip() {
 }
 
 get_sessions() {
-  jq -r 'to_entries | sort_by(.value.slot) | .[].key' "$PORT_REGISTRY" 2>/dev/null
+  jq -r --arg user "$USER" 'to_entries | map(select(.value.private != true or .value.owner == $user or .value.owner == null)) | sort_by(.value.slot) | .[].key' "$PORT_REGISTRY" 2>/dev/null
 }
 
 get_session_field() {
@@ -120,7 +120,7 @@ session_count() {
 # If SHOW_ALL=false, filter to current $USER only
 get_active_sessions_sorted() {
   if [ "$SHOW_ALL" = true ]; then
-    jq -r 'to_entries | sort_by(.value.slot) | .[] | "\(.value.slot)\t\(.key)"' "$PORT_REGISTRY" 2>/dev/null
+    jq -r --arg user "$USER" 'to_entries | map(select(.value.private != true or .value.owner == $user or .value.owner == null)) | sort_by(.value.slot) | .[] | "\(.value.slot)\t\(.key)"' "$PORT_REGISTRY" 2>/dev/null
   else
     jq -r --arg user "$USER" 'to_entries | map(select(.value.owner == $user or .value.owner == null)) | sort_by(.value.slot) | .[] | "\(.value.slot)\t\(.key)"' "$PORT_REGISTRY" 2>/dev/null
   fi

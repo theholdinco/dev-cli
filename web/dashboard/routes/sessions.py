@@ -1,3 +1,5 @@
+import os
+
 from flask import Blueprint, render_template, request, flash, redirect, url_for
 
 from core.sessions import list_sessions, get_session, get_users
@@ -11,7 +13,8 @@ sessions_bp = Blueprint("sessions", __name__, url_prefix="/sessions")
 def list_sessions_view():
     user = request.args.get("user", "")
     users = get_users()
-    sessions = list_sessions(user=user)
+    requesting_user = os.environ.get("USER", "")
+    sessions = list_sessions(user=user, requesting_user=requesting_user)
     return render_template("sessions/list.html", sessions=sessions, users=users, selected_user=user)
 
 
@@ -28,8 +31,9 @@ def create_session():
     from_branch = request.form.get("from_branch", "").strip()
     agent_type = request.form.get("agent_type", "claude")
     yolo = request.form.get("yolo") == "on"
+    private = request.form.get("private") == "on"
 
-    result = new_session(project=project, branch=branch, agent=agent_type, yolo=yolo, from_branch=from_branch)
+    result = new_session(project=project, branch=branch, agent=agent_type, yolo=yolo, from_branch=from_branch, private=private)
     if result.success:
         flash(f"Session created for {project}/{branch}", "success")
     else:

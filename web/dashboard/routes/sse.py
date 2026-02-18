@@ -1,3 +1,4 @@
+import os
 import time
 
 from flask import Blueprint, Response, render_template, request, current_app
@@ -10,11 +11,12 @@ sse_bp = Blueprint("sse", __name__, url_prefix="/sse")
 @sse_bp.route("/sessions")
 def session_stream():
     user = request.args.get("user", "")
+    requesting_user = os.environ.get("USER", "")
 
     def generate():
         while True:
             try:
-                sessions = list_sessions(user=user)
+                sessions = list_sessions(user=user, requesting_user=requesting_user)
                 html = render_template("partials/session_list.html", sessions=sessions)
                 data = html.replace("\n", "\ndata: ")
                 yield f"event: sessions\ndata: {data}\n\n"
