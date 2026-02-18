@@ -2239,6 +2239,64 @@ cmd_status() {
   echo ""
 }
 
+cmd_rename() {
+  local old_name="${2:-}" new_name="${3:-}"
+  [ -z "$old_name" ] && die "Usage: dev rename <session> <new-name>"
+
+  # Partial match old name
+  local match
+  match=$(jq -r "keys[] | select(contains(\"$old_name\"))" "$PORT_REGISTRY" | head -1)
+  [ -z "$match" ] && die "No session matching '$old_name'"
+
+  # If no new name provided, prompt interactively
+  if [ -z "$new_name" ]; then
+    echo ""
+    echo -e "  Current name: ${BOLD}$match${NC}"
+    echo ""
+    read -rp "  New name: " new_name
+    [ -z "$new_name" ] && die "No name provided."
+  fi
+
+  # Validate new name (no spaces, reasonable chars)
+  if [[ "$new_name" =~ [[:space:]] ]] || [[ ! "$new_name" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+    die "Invalid session name. Use only letters, numbers, hyphens, dots, and underscores."
+  fi
+
+  # Check new name doesn't already exist
+  if jq -e ".[\"$new_name\"]" "$PORT_REGISTRY" &>/dev/null; then
+    die "Session '$new_name' already exists."
+  fi
+
+  # Rename in port registry (atomic with flock)
+  (
+    flock -x 200
+    local tmp
+    tmp=$(mktemp)
+    jq --arg old "$match" --arg new "$new_name" \
+      '. as $orig | ($orig[$old]) as $data | del(.[$old]) | .[$new] = $data' \
+      "$PORT_REGISTRY" > "$tmp"
+    mv -f "$tmp" "$PORT_REGISTRY"
+    fix_registry_perms
+  ) 200>"${PORT_REGISTRY}.lock"
+
+  # Rename tmux session
+  if tmux has-session -t "$match" 2>/dev/null; then
+    tmux rename-session -t "$match" "$new_name"
+    log "Renamed tmux session"
+  fi
+
+  # Update task registry if it references this session
+  if [ -f "$TASK_REGISTRY" ] && jq -e '.tasks[] | select(.session == "'"$match"'")' "$TASK_REGISTRY" &>/dev/null 2>&1; then
+    local tmp
+    tmp=$(mktemp)
+    jq --arg old "$match" --arg new "$new_name" \
+      '.tasks = [.tasks[] | if .session == $old then .session = $new else . end]' \
+      "$TASK_REGISTRY" > "$tmp" && mv "$tmp" "$TASK_REGISTRY"
+  fi
+
+  log "Renamed '$match' → '$new_name'"
+}
+
 cmd_gc() {
   ensure_dirs
   local global=false
@@ -4617,6 +4675,7 @@ cmd_help() {
     dev send <session> --file <path>        Send file contents to agent
     dev diff <session>                      Show git diff --stat for session
     dev diff <session> --full               Show full git diff
+    dev rename <session> [new-name]          Rename a session (interactive if no new name)
     dev sync <session>                      Rebase session on upstream base branch
     dev ask <project> [prompt]              Ask AI about the code (lightweight session, no ports)
                                             --agent claude|codex (default: claude)
@@ -4796,6 +4855,7 @@ case "${1:-help}" in
   diff)      cmd_diff "$@" ;;
   sync)      cmd_sync "$@" ;;
   gc)        cmd_gc "$@" ;;
+  rename)    cmd_rename "$@" ;;
   template)  cmd_template "$@" ;;
   config)    cmd_config "$@" ;;
   agent)     cmd_agent "$@" ;;
