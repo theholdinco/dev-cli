@@ -160,7 +160,7 @@ random_farewell() {
 }
 
 fix_registry_perms() {
-  [[ "$PORT_REGISTRY" == "$GLOBAL_PORT_REGISTRY" ]] && chmod 664 "$PORT_REGISTRY" 2>/dev/null
+  [[ "$PORT_REGISTRY" == "$GLOBAL_PORT_REGISTRY" ]] && chmod 664 "$PORT_REGISTRY" 2>/dev/null || true
 }
 
 ensure_dirs() {
