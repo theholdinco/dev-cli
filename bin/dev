@@ -2262,6 +2262,11 @@ cmd_rename() {
     die "Invalid session name. Use only letters, numbers, hyphens, dots, and underscores."
   fi
 
+  # Auto-prepend username if not already present
+  if [[ "$new_name" != "${USER}-"* ]]; then
+    new_name="${USER}-${new_name}"
+  fi
+
   # Check new name doesn't already exist
   if jq -e ".[\"$new_name\"]" "$PORT_REGISTRY" &>/dev/null; then
     die "Session '$new_name' already exists."
