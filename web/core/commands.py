@@ -127,9 +127,12 @@ def run_doctor() -> CommandResult:
     return run_dev(["doctor"])
 
 
-def task_add(project: str, branch: str, description: str, from_branch: str = "") -> CommandResult:
-    """Add a task: dev task add <project> <branch> <description> [--from base]."""
-    args = ["task", "add", project, branch, description]
+def task_add(project: str, description: str, branch: str = "", from_branch: str = "") -> CommandResult:
+    """Add a task: dev task add <project> [branch] <description> [--from base]."""
+    args = ["task", "add", project]
+    if branch:
+        args.append(branch)
+    args.append(description)
     if from_branch:
         args.extend(["--from", from_branch])
     return run_dev(args)

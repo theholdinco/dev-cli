@@ -77,11 +77,21 @@ def get_task(task_id: str) -> Optional[TaskInfo]:
     return None
 
 
-def add_task(project: str, branch: str, description: str, from_branch: str = "") -> TaskInfo:
-    """Add a new task and return it."""
+def _generate_branch(task_id: str, description: str) -> str:
+    """Generate a branch name from task ID and description slug."""
+    import re
+    slug = re.sub(r"[^a-z0-9]+", "-", description.lower()).strip("-")[:50]
+    return f"task-{task_id}/{slug}"
+
+
+def add_task(project: str, description: str, branch: str = "", from_branch: str = "") -> TaskInfo:
+    """Add a new task and return it. Branch is auto-generated if not provided."""
     data = _read_registry()
     task_id = str(data.get("next_id", 1))
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if not branch:
+        branch = _generate_branch(task_id, description)
 
     entry = {
         "id": task_id,
