@@ -150,7 +150,7 @@ process_pending() {
   # Fallback: derive session name from user-project-branch convention (matches bin/dev session_name())
   if [ -z "$session_name" ]; then
     local slug
-    if [[ "$branch" =~ ^task-[0-9]+/ ]]; then
+    if [[ "$branch" =~ ^task-[0-9]+(/|$) ]]; then
       slug="${branch%%/*}"
     else
       slug=$(echo "$branch" | sed 's/[^a-zA-Z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//' | tr '[:upper:]' '[:lower:]')
