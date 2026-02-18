@@ -19,25 +19,32 @@ async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @authorized
 async def cmd_task_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /task_add <project> <branch> <description> [--from base]."""
-    if not context.args or len(context.args) < 3:
+    """Handle /task_add <project> <description> [--branch name] [--from base].
+
+    Branch is optional. If not provided via --branch, a branch name is
+    auto-generated from the task description.
+    """
+    if not context.args or len(context.args) < 2:
         await update.message.reply_text(
-            "Usage: /task_add <project> <branch> <description> [--from base]"
+            "Usage: /task_add <project> <description> [--branch name] [--from base]"
         )
         return
 
     project = context.args[0]
-    branch = context.args[1]
-    remaining = context.args[2:]
+    remaining = context.args[1:]
 
-    # Parse --from flag from remaining args
+    # Extract --from and --branch flags
     from_branch = ""
+    branch = ""
     desc_parts = []
     i = 0
     while i < len(remaining):
         if remaining[i] == "--from" and i + 1 < len(remaining):
             i += 1
             from_branch = remaining[i]
+        elif remaining[i] == "--branch" and i + 1 < len(remaining):
+            i += 1
+            branch = remaining[i]
         else:
             desc_parts.append(remaining[i])
         i += 1
@@ -45,11 +52,11 @@ async def cmd_task_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not description:
         await update.message.reply_text(
-            "Usage: /task_add <project> <branch> <description> [--from base]"
+            "Usage: /task_add <project> <description> [--branch name] [--from base]"
         )
         return
 
-    task = add_task(project=project, branch=branch, description=description, from_branch=from_branch)
+    task = add_task(project=project, description=description, branch=branch, from_branch=from_branch)
     text = format_task(task)
     await update.message.reply_text(truncate(text), parse_mode="MarkdownV2")
 
