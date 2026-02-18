@@ -351,10 +351,10 @@ render() {
   echo ""
   if [ "$compact" = true ]; then
     echo -e "  ${BOLD}[↑↓]${NC}sel ${BOLD}[⏎]${NC}attach ${BOLD}[${KEY_NEW}]${NC}ew ${BOLD}[${KEY_KILL}]${NC}ill"
-    echo -e "  ${BOLD}[p]${NC}orts ${BOLD}[d]${NC}iff ${BOLD}[s]${NC}hell ${BOLD}[u]${NC}rl"
+    echo -e "  ${BOLD}[p]${NC}orts ${BOLD}[d]${NC}iff ${BOLD}[s]${NC}hell ${BOLD}[u]${NC}rl ${BOLD}[e]${NC} rename"
     echo -e "  ${BOLD}[m]${NC}erge ${BOLD}[i]${NC}nfo ${BOLD}[a]${NC}ll ${BOLD}[q]${NC}uit"
   else
-    echo -e "  ${BOLD}[↑↓]${NC} select  ${BOLD}[Enter]${NC} attach  ${BOLD}[${KEY_NEW}]${NC}ew  ${BOLD}[${KEY_KILL}]${NC}ill  ${BOLD}[p]${NC}orts  ${BOLD}[d]${NC}iff  ${BOLD}[+]${NC} add agent"
+    echo -e "  ${BOLD}[↑↓]${NC} select  ${BOLD}[Enter]${NC} attach  ${BOLD}[${KEY_NEW}]${NC}ew  ${BOLD}[${KEY_KILL}]${NC}ill  ${BOLD}[p]${NC}orts  ${BOLD}[d]${NC}iff  ${BOLD}[+]${NC} add agent  ${BOLD}[e]${NC} rename"
     echo -e "  ${BOLD}[m]${NC}erge/PR  ${BOLD}[${KEY_LAZYGIT}]${NC}azygit  ${BOLD}[s]${NC}hell  ${BOLD}[u]${NC}rl  ${BOLD}[i]${NC}nfo  ${BOLD}[a]${NC}ll  ${BOLD}[r]${NC}efresh  ${BOLD}[q]${NC}uit"
   fi
   echo ""
@@ -668,6 +668,22 @@ action_add_agent() {
   read -rp "  Press Enter to return to hub..." _
 }
 
+action_rename() {
+  local name
+  name=$(selected_session_name)
+  [ -z "$name" ] && return
+
+  echo ""
+  echo -e "  Current: ${BOLD}$name${NC}"
+  read -rp "  New name: " new_name
+  echo ""
+
+  if [ -n "$new_name" ]; then
+    dev rename "$name" "$new_name" 2>&1
+    sleep 0.5
+  fi
+}
+
 # ── Main Loop ───────────────────────────────────────────────
 
 main() {
@@ -739,6 +755,9 @@ main() {
         ;;
       +)
         action_add_agent
+        ;;
+      e|E)
+        action_rename
         ;;
       r|R)
         # Just refresh (re-render)
