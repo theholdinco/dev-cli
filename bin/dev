@@ -375,7 +375,7 @@ register_session() {
           },
           created: $created
         }' "$PORT_REGISTRY" > "$tmp"
-    mv "$tmp" "$PORT_REGISTRY"
+    mv -f "$tmp" "$PORT_REGISTRY"
     fix_registry_perms
   ) 200>"${PORT_REGISTRY}.lock"
 }
@@ -388,7 +388,7 @@ unregister_session() {
     local tmp
     tmp=$(mktemp)
     jq "del(.[\"$name\"])" "$PORT_REGISTRY" > "$tmp"
-    mv "$tmp" "$PORT_REGISTRY"
+    mv -f "$tmp" "$PORT_REGISTRY"
     fix_registry_perms
   ) 200>"${PORT_REGISTRY}.lock"
 }
@@ -3136,7 +3136,7 @@ cmd_agent() {
         '(.[$name].agents // [.[$name].agent]) as $current |
          .[$name].agents = ($current + [$agent_type] | unique)' \
         "$PORT_REGISTRY" > "$tmp"
-      mv "$tmp" "$PORT_REGISTRY"
+      mv -f "$tmp" "$PORT_REGISTRY"
       fix_registry_perms
 
       log "Added $agent_type agent to session '$match'"
@@ -3169,7 +3169,7 @@ cmd_agent() {
         '(.[$name].agents // [.[$name].agent]) as $current |
          .[$name].agents = ($current | map(select(. != $agent_type)))' \
         "$PORT_REGISTRY" > "$tmp"
-      mv "$tmp" "$PORT_REGISTRY"
+      mv -f "$tmp" "$PORT_REGISTRY"
       fix_registry_perms
 
       log "Removed $agent_type agent from session '$match'"
@@ -4141,7 +4141,7 @@ cmd_ask() {
           },
           created: $created
         }' "$PORT_REGISTRY" > "$tmp"
-    mv "$tmp" "$PORT_REGISTRY"
+    mv -f "$tmp" "$PORT_REGISTRY"
     fix_registry_perms
   ) 200>"${PORT_REGISTRY}.lock"
 
@@ -4261,7 +4261,7 @@ cmd_ghost() {
           },
           created: $created
         }' "$PORT_REGISTRY" > "$tmp"
-    mv "$tmp" "$PORT_REGISTRY"
+    mv -f "$tmp" "$PORT_REGISTRY"
     fix_registry_perms
   ) 200>"${PORT_REGISTRY}.lock"
 
@@ -4414,7 +4414,7 @@ cmd_review() {
           },
           created: $created
         }' "$PORT_REGISTRY" > "$tmp"
-    mv "$tmp" "$PORT_REGISTRY"
+    mv -f "$tmp" "$PORT_REGISTRY"
     fix_registry_perms
   ) 200>"${PORT_REGISTRY}.lock"
 
