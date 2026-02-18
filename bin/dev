@@ -1581,11 +1581,11 @@ cmd_kill() {
   # Kill tmux session
   tmux kill-session -t "$name" 2>/dev/null && log "Killed tmux session" || warn "tmux session already gone"
 
-  # Ghost sessions have no repo — just clean up the temp dir and unregister
+  # Ghost sessions have no repo — just clean up the directory and unregister
   if [ "$session_type" = "ghost" ]; then
     if [ -d "$worktree_path" ]; then
       rm -rf "$worktree_path"
-      log "Removed temp directory"
+      log "Removed ghost directory"
     fi
     unregister_session "$name"
     log "Session '$name' fully cleaned up"
@@ -4226,9 +4226,9 @@ cmd_ghost() {
   # Check for existing session with same name
   [ -z "$(get_session "$name")" ] || die "Session '$name' already exists."
 
-  # Create a temporary working directory (no repo)
-  local tmp_dir="/tmp/dev-ghost-${ts}"
-  mkdir -p "$tmp_dir"
+  # Create a persistent working directory (no repo)
+  local ghost_dir="$HOME/ghost/${name}"
+  mkdir -p "$ghost_dir"
 
   # Register in port registry (no slot, no ports, no project)
   local agents_json
@@ -4240,7 +4240,7 @@ cmd_ghost() {
     jq --arg name "$name" \
        --arg agent "$agent" \
        --argjson agents "$agents_json" \
-       --arg path "$tmp_dir" \
+       --arg path "$ghost_dir" \
        --arg owner "$USER" \
        --arg created "$(date -Iseconds)" \
        '.[$name] = {
@@ -4279,16 +4279,16 @@ cmd_ghost() {
   case "$agent" in
     claude)
       if [ -n "$prompt" ]; then
-        agent_cmd="cd $tmp_dir && claude${claude_flags} \"$prompt\""
+        agent_cmd="cd $ghost_dir && claude${claude_flags} \"$prompt\""
       else
-        agent_cmd="cd $tmp_dir && claude${claude_flags}"
+        agent_cmd="cd $ghost_dir && claude${claude_flags}"
       fi
       ;;
     codex)
-      agent_cmd="cd $tmp_dir && codex"
+      agent_cmd="cd $ghost_dir && codex"
       ;;
     none)
-      agent_cmd="cd $tmp_dir && echo 'Ready. No agent started.' && bash"
+      agent_cmd="cd $ghost_dir && echo 'Ready. No agent started.' && bash"
       ;;
     *)
       die "Unknown agent: $agent. Use claude, codex, or none."
@@ -4297,7 +4297,7 @@ cmd_ghost() {
 
   # Create tmux session with agent + shell (no server window)
   tmux new-session -d -s "$name" -n "agent" "${env_prefix}${agent_cmd}"
-  tmux new-window -t "$name" -n "shell" "cd $tmp_dir && bash"
+  tmux new-window -t "$name" -n "shell" "cd $ghost_dir && bash"
   tmux select-window -t "$name:1"
 
   log "Ghost session '$name' is running!"
@@ -4306,7 +4306,7 @@ cmd_ghost() {
   echo -e "  ${BOLD}Session:${NC}  $name"
   echo -e "  ${BOLD}Agent:${NC}    $agent"
   echo -e "  ${BOLD}Type:${NC}     ghost ${DIM}(no project, no ports)${NC}"
-  echo -e "  ${BOLD}Path:${NC}     $tmp_dir"
+  echo -e "  ${BOLD}Path:${NC}     $ghost_dir"
   echo ""
   echo -e "  ${DIM}Attach:    dev attach $name${NC}"
   echo -e "  ${DIM}Kill:      dev kill $name${NC}"
