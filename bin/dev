@@ -4253,6 +4253,11 @@ cmd_ghost() {
   local ghost_dir="$HOME/ghost/${name}"
   mkdir -p "$ghost_dir"
 
+  # Symlink ~/assembly into ghost dir so Claude can access it
+  if [ -d "$HOME/assembly" ] && [ ! -e "$ghost_dir/assembly" ]; then
+    ln -s "$HOME/assembly" "$ghost_dir/assembly"
+  fi
+
   # Register in port registry (no slot, no ports, no project)
   local agents_json
   agents_json=$(echo "$agent" | jq -R . | jq -s .)
