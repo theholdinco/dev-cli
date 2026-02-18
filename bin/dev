@@ -284,10 +284,17 @@ slugify() {
   echo "$1" | sed 's/[^a-zA-Z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//' | tr '[:upper:]' '[:lower:]'
 }
 
-# Session name: project-branch
+# Session name: user-project-branch
+# For task branches (task-N/...), use only "task-N" to keep names short
 session_name() {
   local project="$1" branch="$2"
-  echo "${USER}-${project}-$(slugify "$branch")"
+  local slug
+  if [[ "$branch" =~ ^task-[0-9]+/ ]]; then
+    slug="${branch%%/*}"
+  else
+    slug=$(slugify "$branch")
+  fi
+  echo "${USER}-${project}-${slug}"
 }
 
 # ── Port Management ─────────────────────────────────────────────────────────
