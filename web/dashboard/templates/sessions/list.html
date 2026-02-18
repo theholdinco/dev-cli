@@ -1,19 +1,48 @@
 {% extends "base.html" %}
 
-{% block title %}Sessions - dev-cli{% endblock %}
+{% block title %}Sessions{% if selected_user %} ({{ selected_user }}){% endif %} - dev-cli{% endblock %}
 
 {% block content %}
-<div class="flex items-center justify-between mb-6">
-    <h1 class="text-2xl font-bold text-white">Sessions</h1>
-    <a href="{{ url_for('sessions.new_session_form') }}"
-       class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-md transition-colors">
-        New Session
-    </a>
+<div class="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-6 gap-4">
+    <div class="flex items-center space-x-4">
+        <h1 class="text-2xl font-bold text-white">Sessions</h1>
+        {% if selected_user %}
+            <span class="inline-flex items-center px-2.5 py-1 rounded-full text-sm font-medium bg-indigo-900/60 text-indigo-300 border border-indigo-700">
+                {{ selected_user }}
+                <a href="{{ url_for('sessions.list_sessions_view') }}"
+                   class="ml-1.5 text-indigo-400 hover:text-indigo-200" title="Clear filter">&times;</a>
+            </span>
+        {% endif %}
+    </div>
+    <div class="flex items-center space-x-3">
+        {% if users|length > 1 %}
+        <div class="relative">
+            <select onchange="if(this.value) window.location='{{ url_for('sessions.list_sessions_view') }}?user='+this.value; else window.location='{{ url_for('sessions.list_sessions_view') }}';"
+                    class="bg-gray-700 border border-gray-600 text-gray-200 text-sm rounded-md px-3 py-2 pr-8 focus:ring-blue-500 focus:border-blue-500 appearance-none cursor-pointer">
+                <option value="">All users</option>
+                {% for user in users %}
+                    <option value="{{ user }}" {% if user == selected_user %}selected{% endif %}>{{ user }}</option>
+                {% endfor %}
+            </select>
+            <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2">
+                <svg class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                </svg>
+            </div>
+        </div>
+        {% elif users|length == 1 %}
+        <span class="text-sm text-gray-400">Owner: <span class="text-gray-200">{{ users[0] }}</span></span>
+        {% endif %}
+        <a href="{{ url_for('sessions.new_session_form') }}"
+           class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-md transition-colors">
+            New Session
+        </a>
+    </div>
 </div>
 
 <div id="session-list-container"
      hx-ext="sse"
-     sse-connect="{{ url_for('sse.session_stream') }}"
+     sse-connect="{{ url_for('sse.session_stream', user=selected_user) }}"
      sse-swap="sessions"
      hx-target="#session-list"
      hx-swap="innerHTML">
@@ -25,9 +54,9 @@
 
 {% if not sessions %}
 <div class="text-center py-16">
-    <p class="text-gray-500 text-lg mb-4">No active sessions</p>
+    <p class="text-gray-500 text-lg mb-4">No {% if selected_user %}sessions for {{ selected_user }}{% else %}active sessions{% endif %}</p>
     <a href="{{ url_for('sessions.new_session_form') }}"
-       class="text-blue-400 hover:text-blue-300 underline">Create your first session</a>
+       class="text-blue-400 hover:text-blue-300 underline">Create a new session</a>
 </div>
 {% endif %}
 {% endblock %}

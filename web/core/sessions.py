@@ -152,8 +152,11 @@ def get_ip() -> str:
     return "127.0.0.1"
 
 
-def list_sessions(show_all: bool = True) -> list[SessionInfo]:
-    """Read ports.json and return a list of SessionInfo objects sorted by slot."""
+def list_sessions(show_all: bool = True, user: str = "") -> list[SessionInfo]:
+    """Read ports.json and return a list of SessionInfo objects sorted by slot.
+
+    If user is provided, only return sessions owned by that user.
+    """
     if not os.path.isfile(PORT_REGISTRY):
         return []
 
@@ -166,6 +169,12 @@ def list_sessions(show_all: bool = True) -> list[SessionInfo]:
     sessions = []
     for name, entry in data.items():
         slot = entry.get("slot", 0)
+        owner = entry.get("owner", "")
+
+        # Filter by user if specified
+        if user and owner != user:
+            continue
+
         alive = is_alive(name)
 
         if not show_all and not alive:
@@ -184,7 +193,7 @@ def list_sessions(show_all: bool = True) -> list[SessionInfo]:
             slot=slot,
             agents=entry.get("agents", []),
             ports=ports,
-            owner=entry.get("owner", ""),
+            owner=owner,
             created=created,
             worktree=worktree,
             alive=alive,
@@ -196,6 +205,26 @@ def list_sessions(show_all: bool = True) -> list[SessionInfo]:
 
     sessions.sort(key=lambda s: s.slot)
     return sessions
+
+
+def get_users() -> list[str]:
+    """Return a sorted list of unique session owners from ports.json."""
+    if not os.path.isfile(PORT_REGISTRY):
+        return []
+
+    try:
+        with open(PORT_REGISTRY, "r") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    owners = set()
+    for entry in data.values():
+        owner = entry.get("owner", "")
+        if owner:
+            owners.add(owner)
+
+    return sorted(owners)
 
 
 def get_session(name: str) -> Optional[SessionInfo]:

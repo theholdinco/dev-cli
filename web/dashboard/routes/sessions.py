@@ -1,6 +1,6 @@
 from flask import Blueprint, render_template, request, flash, redirect, url_for
 
-from core.sessions import list_sessions, get_session
+from core.sessions import list_sessions, get_session, get_users
 from core.commands import new_session, kill_session, restart_session
 from core.system import get_projects
 
@@ -9,8 +9,10 @@ sessions_bp = Blueprint("sessions", __name__, url_prefix="/sessions")
 
 @sessions_bp.route("/")
 def list_sessions_view():
-    sessions = list_sessions()
-    return render_template("sessions/list.html", sessions=sessions)
+    user = request.args.get("user", "")
+    users = get_users()
+    sessions = list_sessions(user=user)
+    return render_template("sessions/list.html", sessions=sessions, users=users, selected_user=user)
 
 
 @sessions_bp.route("/new")

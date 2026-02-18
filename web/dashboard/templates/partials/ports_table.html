@@ -6,6 +6,7 @@
             <thead class="text-xs text-gray-400 uppercase bg-gray-800 border-b border-gray-700">
                 <tr>
                     <th class="px-4 py-3">Session</th>
+                    <th class="px-4 py-3">Owner</th>
                     <th class="px-4 py-3">Slot</th>
                     <th class="px-4 py-3">Frontend</th>
                     <th class="px-4 py-3">Backend</th>
@@ -21,6 +22,14 @@
                             {{ port.name }}
                         </a>
                     </td>
+                    <td class="px-4 py-3">
+                        {% if port.owner %}
+                            <a href="{{ url_for('sessions.list_sessions_view', user=port.owner) }}"
+                               class="text-indigo-400 hover:text-indigo-300 text-xs">{{ port.owner }}</a>
+                        {% else %}
+                            <span class="text-gray-500 text-xs">—</span>
+                        {% endif %}
+                    </td>
                     <td class="px-4 py-3 text-gray-300">{{ port.slot }}</td>
                     <td class="px-4 py-3 font-mono text-gray-300">{{ port.frontend }}</td>
                     <td class="px-4 py-3 font-mono text-gray-300">{{ port.backend }}</td>
@@ -34,7 +43,7 @@
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="5" class="px-4 py-8 text-center text-gray-500">No active port allocations</td>
+                    <td colspan="6" class="px-4 py-8 text-center text-gray-500">No active port allocations</td>
                 </tr>
                 {% endfor %}
             </tbody>
