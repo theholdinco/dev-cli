@@ -56,8 +56,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @authorized
 async def cmd_ls(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /ls command. Optional 'all' argument to show dead sessions."""
+    import os
     show_all = bool(context.args and context.args[0].lower() in ("all", "--all", "-a"))
-    sessions = list_sessions(show_all=show_all)
+    requesting_user = os.environ.get("USER", "")
+    sessions = list_sessions(show_all=show_all, requesting_user=requesting_user)
     text = format_session_list(sessions)
     await update.message.reply_text(truncate(text), parse_mode="MarkdownV2")
 
@@ -94,11 +96,14 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from_branch = ""
 
     remaining = context.args[2:]
+    private = False
     i = 0
     while i < len(remaining):
         arg = remaining[i]
         if arg == "--yolo":
             yolo = True
+        elif arg == "--private":
+            private = True
         elif arg == "--from" and i + 1 < len(remaining):
             i += 1
             from_branch = remaining[i]
@@ -112,7 +117,7 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f" with {agent}..."
     await update.message.reply_text(msg)
 
-    result = new_session(project, branch, agent=agent, yolo=yolo, from_branch=from_branch)
+    result = new_session(project, branch, agent=agent, yolo=yolo, from_branch=from_branch, private=private)
 
     if result.success:
         output = result.output.strip() if result.output else "Session created."

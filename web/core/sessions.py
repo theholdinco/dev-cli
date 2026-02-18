@@ -25,6 +25,7 @@ class SessionInfo:
     age: str = ""
     git_dirty: int = 0
     git_ahead: int = 0
+    private: bool = False
 
 
 def slot_ports(slot: int) -> dict:
@@ -152,10 +153,11 @@ def get_ip() -> str:
     return "127.0.0.1"
 
 
-def list_sessions(show_all: bool = True, user: str = "") -> list[SessionInfo]:
+def list_sessions(show_all: bool = True, user: str = "", requesting_user: str = "") -> list[SessionInfo]:
     """Read ports.json and return a list of SessionInfo objects sorted by slot.
 
     If user is provided, only return sessions owned by that user.
+    If requesting_user is provided, hide private sessions not owned by that user.
     """
     if not os.path.isfile(PORT_REGISTRY):
         return []
@@ -170,9 +172,14 @@ def list_sessions(show_all: bool = True, user: str = "") -> list[SessionInfo]:
     for name, entry in data.items():
         slot = entry.get("slot", 0)
         owner = entry.get("owner", "")
+        is_private = entry.get("private", False)
 
         # Filter by user if specified
         if user and owner != user:
+            continue
+
+        # Hide private sessions from other users
+        if is_private and requesting_user and owner != requesting_user:
             continue
 
         alive = is_alive(name)
@@ -200,6 +207,7 @@ def list_sessions(show_all: bool = True, user: str = "") -> list[SessionInfo]:
             age=human_readable_age(created),
             git_dirty=dirty,
             git_ahead=ahead,
+            private=is_private,
         )
         sessions.append(session)
 

@@ -25,6 +25,7 @@ class TaskInfo:
     created: str = ""
     started: Optional[str] = None
     completed: Optional[str] = None
+    private: bool = False
 
 
 def _read_registry() -> dict:
@@ -60,6 +61,7 @@ def _task_from_dict(d: dict) -> TaskInfo:
         created=d.get("created", ""),
         started=d.get("started"),
         completed=d.get("completed"),
+        private=d.get("private", False),
     )
 
 
@@ -84,7 +86,7 @@ def _generate_branch(task_id: str, description: str) -> str:
     return f"task-{task_id}/{slug}"
 
 
-def add_task(project: str, description: str, branch: str = "", from_branch: str = "") -> TaskInfo:
+def add_task(project: str, description: str, branch: str = "", from_branch: str = "", private: bool = False) -> TaskInfo:
     """Add a new task and return it. Branch is auto-generated if not provided."""
     data = _read_registry()
     task_id = str(data.get("next_id", 1))
@@ -99,6 +101,7 @@ def add_task(project: str, description: str, branch: str = "", from_branch: str 
         "branch": branch,
         "description": description,
         "from_branch": from_branch or None,
+        "private": private,
         "status": "pending",
         "session": None,
         "pr_url": None,

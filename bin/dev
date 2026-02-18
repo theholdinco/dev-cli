@@ -327,7 +327,7 @@ slot_ports() {
 
 # Register a session in the port registry
 register_session() {
-  local name="$1" project="$2" branch="$3" slot="$4" agent="$5" worktree_path="$6"
+  local name="$1" project="$2" branch="$3" slot="$4" agent="$5" worktree_path="$6" private="${7:-false}"
   local ports
   ports=$(slot_ports "$slot")
   read -r frontend backend supa_api supa_db supa_studio <<< "$ports"
@@ -368,6 +368,7 @@ register_session() {
        --argjson supa_db "$supa_db" \
        --argjson supa_studio "$supa_studio" \
        --arg created "$(date -Iseconds)" \
+       --argjson private "$private" \
        '.[$name] = {
           project: $project,
           branch: $branch,
@@ -376,6 +377,7 @@ register_session() {
           agents: $agents,
           path: $path,
           owner: $owner,
+          private: $private,
           ports: {
             frontend: $frontend,
             backend: $backend,
@@ -978,7 +980,7 @@ cmd_setup() {
 }
 
 cmd_new() {
-  local project="${2:-}" branch="${3:-}" agent="" agents_flag="" run_cmd="" yolo=false attach=false from_branch=""
+  local project="${2:-}" branch="${3:-}" agent="" agents_flag="" run_cmd="" yolo=false attach=false from_branch="" private=false
   shift 2 || true
 
   # Parse options
@@ -994,6 +996,7 @@ cmd_new() {
       --from=*) from_branch="${1#*=}"; shift ;;
       --yolo) yolo=true; shift ;;
       --attach) attach=true; shift ;;
+      --private) private=true; shift ;;
       *) shift ;;
     esac
   done
@@ -1022,8 +1025,8 @@ cmd_new() {
     [ "$config_yolo" = "true" ] && yolo=true
   fi
 
-  [ -z "$project" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach]"
-  [ -z "$branch" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach]"
+  [ -z "$project" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--private]"
+  [ -z "$branch" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--private]"
 
   local bare_dir="$PROJECTS_DIR/$project"
   local wt_dir="$PROJECTS_DIR/${project}-worktrees"
@@ -1164,7 +1167,7 @@ cmd_new() {
   fi
 
   # Register in port registry
-  register_session "$name" "$project" "$branch" "$slot" "$agent" "$worktree_path"
+  register_session "$name" "$project" "$branch" "$slot" "$agent" "$worktree_path" "$private"
 
   # Source secrets
   local env_prefix=""
@@ -1267,7 +1270,7 @@ cmd_ls() {
 
   local sessions
   if [ "$show_all" = true ]; then
-    sessions=$(jq -r 'keys[]' "$PORT_REGISTRY" 2>/dev/null)
+    sessions=$(jq -r --arg user "$USER" 'to_entries[] | select(.value.private != true or .value.owner == $user or .value.owner == null) | .key' "$PORT_REGISTRY" 2>/dev/null)
   else
     sessions=$(jq -r --arg user "$USER" 'to_entries[] | select(.value.owner == $user or .value.owner == null) | .key' "$PORT_REGISTRY" 2>/dev/null)
   fi
@@ -1389,7 +1392,7 @@ cmd_attach() {
     # If no name, show picker
     local sessions
     if [ "$show_all" = true ]; then
-      sessions=$(jq -r 'keys[]' "$PORT_REGISTRY" 2>/dev/null)
+      sessions=$(jq -r --arg user "$USER" 'to_entries[] | select(.value.private != true or .value.owner == $user or .value.owner == null) | .key' "$PORT_REGISTRY" 2>/dev/null)
     else
       sessions=$(jq -r --arg user "$USER" 'to_entries[] | select(.value.owner == $user or .value.owner == null) | .key' "$PORT_REGISTRY" 2>/dev/null)
     fi
@@ -1446,7 +1449,7 @@ cmd_kill() {
 
   if [ "$kill_all" = true ]; then
     local sessions
-    sessions=$(jq -r 'keys[]' "$PORT_REGISTRY" 2>/dev/null)
+    sessions=$(jq -r --arg user "$USER" '[to_entries[] | select(.value.private != true or .value.owner == $user or .value.owner == null)] | .[].key' "$PORT_REGISTRY" 2>/dev/null)
     if [ -z "$sessions" ]; then
       echo "No sessions to kill."
       return 0
@@ -1471,7 +1474,7 @@ cmd_kill() {
 
   if [ -n "$kill_project" ] && [ "$kill_project" != "__NEXT__" ]; then
     local sessions
-    sessions=$(jq -r "to_entries[] | select(.value.project == \"$kill_project\") | .key" "$PORT_REGISTRY" 2>/dev/null)
+    sessions=$(jq -r --arg user "$USER" --arg proj "$kill_project" 'to_entries[] | select(.value.project == $proj) | select(.value.private != true or .value.owner == $user or .value.owner == null) | .key' "$PORT_REGISTRY" 2>/dev/null)
     if [ -z "$sessions" ]; then
       echo "No sessions for project '$kill_project'."
       return 0
@@ -1750,7 +1753,7 @@ cmd_ports() {
   echo ""
 
   local active_slots
-  active_slots=$(jq -r 'to_entries | sort_by(.value.slot) | .[] | "\(.value.slot)\t\(.key)"' "$PORT_REGISTRY" 2>/dev/null)
+  active_slots=$(jq -r --arg user "$USER" 'to_entries | map(select(.value.private != true or .value.owner == $user or .value.owner == null)) | sort_by(.value.slot) | .[] | "\(.value.slot)\t\(.key)"' "$PORT_REGISTRY" 2>/dev/null)
 
   if [ -z "$active_slots" ]; then
     echo -e "  ${DIM}No active sessions. All $MAX_SLOTS slots available.${NC}"
@@ -2305,6 +2308,52 @@ cmd_rename() {
   log "Renamed '$match' → '$new_name'"
 }
 
+cmd_private() {
+  local name="${2:-}" toggle="${3:-}"
+  [ -z "$name" ] && die "Usage: dev private <session> [on|off]"
+
+  # Partial match
+  local match
+  match=$(jq -r "keys[] | select(contains(\"$name\"))" "$PORT_REGISTRY" | head -1)
+  [ -z "$match" ] && die "No session matching '$name'"
+
+  # Determine new value
+  local new_val
+  if [ -z "$toggle" ]; then
+    # Toggle current value
+    local current
+    current=$(jq -r ".\"$match\".private // false" "$PORT_REGISTRY")
+    if [ "$current" = "true" ]; then
+      new_val=false
+    else
+      new_val=true
+    fi
+  elif [ "$toggle" = "on" ]; then
+    new_val=true
+  elif [ "$toggle" = "off" ]; then
+    new_val=false
+  else
+    die "Usage: dev private <session> [on|off]"
+  fi
+
+  # Update registry
+  (
+    flock -x 200
+    local tmp
+    tmp=$(mktemp)
+    jq --arg name "$match" --argjson val "$new_val" \
+      '.[$name].private = $val' "$PORT_REGISTRY" > "$tmp"
+    mv -f "$tmp" "$PORT_REGISTRY"
+    fix_registry_perms
+  ) 200>"${PORT_REGISTRY}.lock"
+
+  if [ "$new_val" = "true" ]; then
+    log "'$match' is now private (hidden from other users)"
+  else
+    log "'$match' is now public (visible to all users)"
+  fi
+}
+
 cmd_gc() {
   ensure_dirs
   local global=false
@@ -2314,7 +2363,7 @@ cmd_gc() {
 
   local sessions
   if $global; then
-    sessions=$(jq -r 'keys[]' "$PORT_REGISTRY" 2>/dev/null)
+    sessions=$(jq -r --arg user "$USER" '[to_entries[] | select(.value.private != true or .value.owner == $user or .value.owner == null)] | .[].key' "$PORT_REGISTRY" 2>/dev/null)
   else
     sessions=$(jq -r --arg user "$USER" 'to_entries[] | select(.value.owner == $user) | .key' "$PORT_REGISTRY" 2>/dev/null)
   fi
@@ -3883,7 +3932,7 @@ cmd_task() {
 
   case "$subcmd" in
     add)
-      local project="" branch="" description="" from_branch=""
+      local project="" branch="" description="" from_branch="" private=false
       shift 2  # skip "task add"
 
       # Parse positional args and flags
@@ -3891,6 +3940,7 @@ cmd_task() {
         case "${1:-}" in
           --from) from_branch="${2:-}"; shift 2 ;;
           --from=*) from_branch="${1#*=}"; shift ;;
+          --private) private=true; shift ;;
           *)
             if [ -z "$project" ]; then
               project="$1"
@@ -3904,7 +3954,7 @@ cmd_task() {
         esac
       done
 
-      [ -n "$project" ] || die "Usage: dev task add <project> [branch] \"description\" [--from <base>]"
+      [ -n "$project" ] || die "Usage: dev task add <project> [branch] \"description\" [--from <base>] [--private]"
 
       # If only two positional args given (project + description, no branch),
       # treat second arg as description and auto-generate branch name
@@ -3913,7 +3963,7 @@ cmd_task() {
         branch=""
       fi
 
-      [ -n "$description" ] || die "Usage: dev task add <project> [branch] \"description\" [--from <base>]"
+      [ -n "$description" ] || die "Usage: dev task add <project> [branch] \"description\" [--from <base>] [--private]"
 
       # Auto-generate branch name from description if not provided
       if [ -z "$branch" ]; then
@@ -3935,12 +3985,14 @@ cmd_task() {
       jq --arg id "$id" --arg proj "$project" --arg br "$branch" \
          --arg desc "$description" --arg now "$now" \
          --arg from "$from_branch" \
+         --argjson private "$private" \
         '.tasks += [{
           id: $id,
           project: $proj,
           branch: $br,
           description: $desc,
           from_branch: (if $from == "" then null else $from end),
+          private: $private,
           status: "pending",
           session: null,
           pr_url: null,
@@ -4673,13 +4725,14 @@ cmd_help() {
     dev help                                Show this help
 
   SESSIONS
-    dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--run "<cmd>"]
+    dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--run "<cmd>"] [--private]
                                             Create worktree + start agent(s)
                                             --from base the new branch off a specific branch (instead of main)
                                             --agents starts multiple agents (comma-separated)
                                             --yolo launches Claude with --dangerously-skip-permissions
                                             --attach auto-attach to the session after creation
                                             --run auto-starts a command in the server window
+                                            --private hide session from other users' listings
     dev ls                                  List your active sessions
     dev ls --all                              List all users' sessions
     dev attach [session] [--all]             Attach to tmux session (interactive picker if no arg, shows only your sessions by default)
@@ -4694,6 +4747,7 @@ cmd_help() {
     dev diff <session>                      Show git diff --stat for session
     dev diff <session> --full               Show full git diff
     dev rename <session> [new-name]          Rename a session (interactive if no new name)
+    dev private <session> [on|off]          Toggle or set session privacy (hidden from other users)
     dev sync <session>                      Rebase session on upstream base branch
     dev ask <project> [prompt]              Ask AI about the code (lightweight session, no ports)
                                             --agent claude|codex (default: claude)
@@ -4777,10 +4831,11 @@ cmd_help() {
     dev bot status                          Show bot status
 
   TASKS (automated task queue)
-    dev task add <project> [branch] "desc" [--from <base>]
+    dev task add <project> [branch] "desc" [--from <base>] [--private]
                                             Add a task to the queue
                                             Branch is optional — auto-generated from description if omitted
                                             --from base the worktree off a specific branch
+                                            --private hide task from other users
     dev task ls [--pending|--running|--done|--failed|--pr-created|--all]
                                             List tasks (filterable by status)
     dev task rm <id>                        Remove a task
@@ -4875,6 +4930,7 @@ case "${1:-help}" in
   sync)      cmd_sync "$@" ;;
   gc)        cmd_gc "$@" ;;
   rename)    cmd_rename "$@" ;;
+  private)   cmd_private "$@" ;;
   template)  cmd_template "$@" ;;
   config)    cmd_config "$@" ;;
   agent)     cmd_agent "$@" ;;

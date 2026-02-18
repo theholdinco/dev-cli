@@ -45,7 +45,9 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @authorized
 async def cmd_ports(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /ports — show port allocation table."""
-    sessions = list_sessions(show_all=True)
+    import os
+    requesting_user = os.environ.get("USER", "")
+    sessions = list_sessions(show_all=True, requesting_user=requesting_user)
     text = format_ports_table(sessions)
     await update.message.reply_text(truncate(text), parse_mode="MarkdownV2")
 

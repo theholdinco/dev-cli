@@ -50,15 +50,17 @@ def run_dev(args: list[str], timeout: int = 60, stdin_data: str = None) -> Comma
 
 
 def new_session(
-    project: str, branch: str, agent: str = "claude", yolo: bool = False, from_branch: str = ""
+    project: str, branch: str, agent: str = "claude", yolo: bool = False, from_branch: str = "", private: bool = False
 ) -> CommandResult:
-    """Create a new session: dev new <project> <branch> [--from base] [--agent type] [--yolo]."""
+    """Create a new session: dev new <project> <branch> [--from base] [--agent type] [--yolo] [--private]."""
     args = ["new", project, branch]
     if from_branch:
         args.extend(["--from", from_branch])
     args.extend(["--agent", agent])
     if yolo:
         args.append("--yolo")
+    if private:
+        args.append("--private")
     return run_dev(args)
 
 
