@@ -1418,10 +1418,57 @@ cmd_attach() {
     [ -z "$name" ] && die "Invalid selection."
   fi
 
-  # Support partial matching
+  # Support partial matching — collect all matches
+  local matches
+  matches=$(jq -r "keys[] | select(contains(\"$name\"))" "$PORT_REGISTRY")
+  [ -z "$matches" ] && die "No session matching '$name'"
+
+  # Filter out dead sessions (no active tmux session)
+  local alive_matches=()
+  while IFS= read -r m; do
+    if tmux has-session -t "$m" 2>/dev/null; then
+      alive_matches+=("$m")
+    fi
+  done <<< "$matches"
+
+  if [ "${#alive_matches[@]}" -eq 0 ]; then
+    die "No live session matching '$name' (found only dead sessions — run 'dev gc' to clean up)"
+  fi
+
   local match
-  match=$(jq -r "keys[] | select(contains(\"$name\"))" "$PORT_REGISTRY" | head -1)
-  [ -z "$match" ] && die "No session matching '$name'"
+  if [ "${#alive_matches[@]}" -eq 1 ]; then
+    match="${alive_matches[0]}"
+  else
+    # Check for exact match first
+    for m in "${alive_matches[@]}"; do
+      if [ "$m" = "$name" ]; then
+        match="$m"
+        break
+      fi
+    done
+
+    if [ -z "${match:-}" ]; then
+      # Multiple live matches — prompt user to select
+      echo ""
+      echo -e "  ${YELLOW}Multiple live sessions match '$name':${NC}"
+      echo ""
+      local i=1
+      for m in "${alive_matches[@]}"; do
+        local agent branch
+        agent=$(get_session_field "$m" "agent")
+        branch=$(get_session_field "$m" "branch")
+        echo -e "    ${BLUE}$i)${NC} $m [$agent] ($branch)"
+        i=$((i + 1))
+      done
+      echo ""
+      read -rp "  Select session number: " choice
+      if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#alive_matches[@]}" ]; then
+        match="${alive_matches[$((choice - 1))]}"
+      else
+        die "Invalid selection."
+      fi
+    fi
+  fi
 
   tmux attach-session -t "$match"
 }
