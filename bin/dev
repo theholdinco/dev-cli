@@ -2112,8 +2112,8 @@ cmd_send() {
 
   [ -z "$prompt" ] && die "No prompt provided. Usage: dev send <session> <prompt>"
 
-  tmux send-keys -t "$match:0" -l "$prompt"
-  tmux send-keys -t "$match:0" Enter
+  tmux send-keys -t "$match:agent" -l "$prompt"
+  tmux send-keys -t "$match:agent" Enter
   log "Sent to $match"
 }
 
@@ -4599,7 +4599,7 @@ cmd_review() {
   # Create tmux session
   tmux new-session -d -s "$name" -n "agent" "${env_prefix}${agent_cmd}"
   tmux new-window -t "$name" -n "shell" "cd $tmp_path && bash"
-  tmux select-window -t "$name:1"
+  tmux select-window -t "$name:agent"
 
   log "Review session '$name' is running!"
   echo ""
