@@ -191,13 +191,13 @@ _dev() {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
   # All available commands
-  commands="init setup new ls attach kill hub dashboard ports logs url supabase pr shell worktree img projects update help status restart send diff sync gc rename private template config agent stats doctor web bot services notify mobile m task ask ghost review vibes fortune lenny"
+  commands="init setup new ls attach kill hub dashboard ports logs url supabase pr pr-start shell worktree img projects update help status restart send diff sync gc rename private template config agent stats doctor web bot services notify mobile m task ask ghost review vibes fortune lenny"
 
   # Commands that take a session name as argument
   session_cmds="attach kill logs url shell pr status restart send diff sync rename private review"
 
   # Commands that take a project name as argument
-  project_cmds="new setup template worktree ask"
+  project_cmds="new setup template worktree ask pr-start"
 
   # First argument: complete command names
   if [ "$COMP_CWORD" -eq 1 ]; then
