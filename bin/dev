@@ -1059,17 +1059,17 @@ cmd_new() {
 
   if [ -n "$from_branch" ]; then
     # User specified a base branch with --from
-    # Check if the branch exists locally
-    if git show-ref --verify --quiet "refs/heads/$from_branch" 2>/dev/null; then
-      info "Base branch '$from_branch' found locally"
-    elif git show-ref --verify --quiet "refs/remotes/origin/$from_branch" 2>/dev/null; then
-      # Branch exists on origin but not locally — create local tracking branch
-      info "Base branch '$from_branch' not found locally, creating from origin/$from_branch"
-      git branch "$from_branch" "origin/$from_branch" 2>/dev/null || true
+    # Prefer origin ref (freshly fetched) over potentially stale local branch
+    local from_ref
+    if git show-ref --verify --quiet "refs/remotes/origin/$from_branch" 2>/dev/null; then
+      from_ref="origin/$from_branch"
+      info "Using freshly fetched origin/$from_branch as base"
+    elif git show-ref --verify --quiet "refs/heads/$from_branch" 2>/dev/null; then
+      from_ref="$from_branch"
+      info "Base branch '$from_branch' found locally (not on origin)"
     else
       die "Base branch '$from_branch' not found locally or on origin."
     fi
-    local from_ref="$from_branch"
     info "Branch '$branch' will be based on $from_ref"
     if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
       # Branch already exists locally, just check it out
