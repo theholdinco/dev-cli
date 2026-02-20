@@ -1973,6 +1973,136 @@ cmd_supabase() {
   esac
 }
 
+cmd_pr_start() {
+  local project="${2:-}" pr_ref="${3:-}" agent="" agents_flag="" yolo=false attach=false private=false prompt=""
+  shift 2 || true
+  shift || true
+
+  # Parse options
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --agent) agent="${2:-claude}"; shift 2 ;;
+      --agent=*) agent="${1#*=}"; shift ;;
+      --agents) agents_flag="${2:-}"; shift 2 ;;
+      --agents=*) agents_flag="${1#*=}"; shift ;;
+      --yolo) yolo=true; shift ;;
+      --attach) attach=true; shift ;;
+      --private) private=true; shift ;;
+      --prompt) prompt="${2:-}"; shift 2 ;;
+      --prompt=*) prompt="${1#*=}"; shift ;;
+      *) shift ;;
+    esac
+  done
+
+  [ -z "$project" ] && die "Usage: dev pr-start <project> <pr-number|pr-url> [--agent claude|codex|none] [--yolo] [--attach] [--private] [--prompt \"...\"]"
+  [ -z "$pr_ref" ] && die "Usage: dev pr-start <project> <pr-number|pr-url> [--agent claude|codex|none] [--yolo] [--attach] [--private] [--prompt \"...\"]"
+
+  local bare_dir="$PROJECTS_DIR/$project"
+  [ -d "$bare_dir" ] || die "Project '$project' not found. Run 'dev setup $project <url>' first."
+
+  # Resolve the PR reference — could be a number (#123 or 123) or a full URL
+  local pr_number=""
+  if [[ "$pr_ref" =~ ^https?:// ]]; then
+    # Extract PR number from URL (e.g., https://github.com/org/repo/pull/123)
+    pr_number=$(echo "$pr_ref" | grep -oP '/pull/\K[0-9]+' || true)
+    [ -z "$pr_number" ] && die "Could not extract PR number from URL: $pr_ref"
+  else
+    pr_number="${pr_ref#\#}"
+  fi
+
+  # Fetch PR metadata using gh
+  info "Fetching PR #${pr_number} info..."
+  cd "$bare_dir"
+
+  local pr_json
+  pr_json=$(gh pr view "$pr_number" --json headRefName,title,body,url,state,number 2>/dev/null) \
+    || die "Could not fetch PR #${pr_number}. Make sure the PR exists and 'gh' is authenticated."
+
+  local branch pr_title pr_body pr_url pr_state
+  branch=$(echo "$pr_json" | jq -r '.headRefName')
+  pr_title=$(echo "$pr_json" | jq -r '.title')
+  pr_body=$(echo "$pr_json" | jq -r '.body // ""')
+  pr_url=$(echo "$pr_json" | jq -r '.url')
+  pr_state=$(echo "$pr_json" | jq -r '.state')
+
+  [ -z "$branch" ] && die "Could not determine branch for PR #${pr_number}"
+
+  info "PR #${pr_number}: $pr_title"
+  info "Branch: $branch (state: $pr_state)"
+
+  # Build args for cmd_new
+  local new_args=("new" "$project" "$branch")
+  if [ -n "$agents_flag" ]; then
+    new_args+=("--agents" "$agents_flag")
+  elif [ -n "$agent" ]; then
+    new_args+=("--agent" "$agent")
+  fi
+  [ "$yolo" = true ] && new_args+=("--yolo")
+  [ "$attach" = false ] && true  # don't pass --attach yet, we send prompt first
+  [ "$private" = true ] && new_args+=("--private")
+
+  # Create the session via cmd_new
+  cmd_new "${new_args[@]}"
+
+  # Build the session name so we can send context to it
+  local name
+  name=$(session_name "$project" "$branch")
+
+  # Write PR context file into the worktree for the agent to reference
+  local worktree_path
+  worktree_path=$(get_session_field "$name" "path")
+
+  if [ -n "$worktree_path" ] && [ -d "$worktree_path" ]; then
+    cat > "$worktree_path/.pr-context.md" << PREOF
+# PR #${pr_number}: ${pr_title}
+
+**URL:** ${pr_url}
+**State:** ${pr_state}
+**Branch:** ${branch}
+
+## Description
+
+${pr_body}
+PREOF
+
+    # Send the PR context to the agent
+    local context_prompt
+    if [ -n "$prompt" ]; then
+      context_prompt="You are continuing work on an existing PR. Read .pr-context.md for the PR details (PR #${pr_number}: ${pr_title}). ${prompt}"
+    else
+      context_prompt="You are continuing work on an existing PR. Read .pr-context.md for the full PR description and context. The PR is #${pr_number}: ${pr_title} (${pr_url}). Review the existing changes and continue working on this PR."
+    fi
+
+    # Small delay to let the agent start up
+    sleep 1
+    tmux send-keys -t "$name:agent" -l "$context_prompt"
+    tmux send-keys -t "$name:agent" Enter
+    log "PR context sent to agent"
+  fi
+
+  # Update the registry with PR metadata
+  (
+    flock -x 200
+    local tmp
+    tmp=$(mktemp)
+    jq --arg name "$name" \
+       --arg pr_url "$pr_url" \
+       --arg pr_title "$pr_title" \
+       --argjson pr_number "$pr_number" \
+       '.[$name].pr_url = $pr_url | .[$name].pr_number = $pr_number | .[$name].pr_title = $pr_title' \
+       "$PORT_REGISTRY" > "$tmp"
+    mv -f "$tmp" "$PORT_REGISTRY"
+    fix_registry_perms
+  ) 200>"${PORT_REGISTRY}.lock"
+
+  echo -e "  ${BOLD}PR:${NC}       ${CYAN}$pr_url${NC}"
+  echo ""
+
+  if [ "$attach" = true ]; then
+    tmux attach-session -t "$name"
+  fi
+}
+
 cmd_pr() {
   local name="${2:-}"
   [ -z "$name" ] && die "Usage: dev pr <session> [--title \"PR title\"] [--draft]"
@@ -4842,6 +4972,13 @@ cmd_help() {
                                             Remove an agent from a session
     dev agent list <session>                List running agents in a session
 
+  START FROM PR
+    dev pr-start <project> <pr-number|url> [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--private] [--prompt "..."]
+                                            Start a session from an existing PR
+                                            Fetches the PR branch, creates a full worktree session,
+                                            and sends PR context to the agent
+                                            --prompt provides a custom instruction for the agent
+
   FINISH & MERGE
     dev pr <session>                        Push, create PR, optionally kill session
     dev pr <session> --draft                Create as draft PR
@@ -4947,6 +5084,9 @@ cmd_help() {
     dev new klyra feat/trading-ui --agent claude
     dev new klyra feat/trading-ui --yolo
     dev new klyra fix/auth-bug --agents claude,codex
+    dev pr-start klyra 42                         # start session from PR #42
+    dev pr-start klyra 42 --yolo --attach        # start from PR, skip perms, attach
+    dev pr-start klyra https://github.com/org/klyra/pull/42  # start from PR URL
     dev ask klyra "how does the auth flow work?"
     dev ask klyra                                # interactive session
     dev ghost                                    # standalone AI, no project
@@ -4993,6 +5133,7 @@ case "${1:-help}" in
   url)       cmd_url "$@" ;;
   supabase)  cmd_supabase "$@" ;;
   pr)        cmd_pr "$@" ;;
+  pr-start)  cmd_pr_start "$@" ;;
   shell|sh)  cmd_shell "$@" ;;
   img)       cmd_img "$@" ;;
   worktree)  cmd_worktree "$@" ;;
