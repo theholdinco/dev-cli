@@ -2342,8 +2342,34 @@ cmd_sync() {
   info "Syncing $match with origin/$base_branch..."
   cd "$worktree_path"
   git fetch origin
-  git rebase "origin/$base_branch"
-  log "Synced with origin/$base_branch"
+
+  # Stash any uncommitted changes so rebase can proceed
+  local stashed=false
+  if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+    info "Stashing uncommitted changes..."
+    git stash push -m "dev-cli sync auto-stash" --include-untracked
+    stashed=true
+  fi
+
+  if git rebase "origin/$base_branch"; then
+    log "Synced with origin/$base_branch"
+  else
+    warn "Rebase failed — aborting rebase and restoring previous state"
+    git rebase --abort
+    if [ "$stashed" = true ]; then
+      git stash pop
+      stashed=false
+    fi
+    die "Rebase conflict with origin/$base_branch. Resolve manually."
+  fi
+
+  # Restore stashed changes
+  if [ "$stashed" = true ]; then
+    info "Restoring stashed changes..."
+    if ! git stash pop; then
+      warn "Stash pop had conflicts — your changes are still in the stash. Run 'git stash pop' manually to resolve."
+    fi
+  fi
 }
 
 cmd_template() {
