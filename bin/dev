@@ -273,6 +273,13 @@ create_tmux_windows() {
   tmux select-window -t "$session:$default_win"
 }
 
+# Create an OSC 8 clickable hyperlink for terminal emulators
+# Usage: hyperlink <url> <display_text>
+hyperlink() {
+  local url="$1" text="$2"
+  printf '\033]8;;%s\033\\%s\033]8;;\033\\' "$url" "$text"
+}
+
 # Get Tailscale IP (fallback to hostname -I)
 get_ip() {
   if command -v tailscale &>/dev/null; then
@@ -1324,10 +1331,14 @@ cmd_ls() {
       branch_display=$(echo "$branch" | cut -c1-20)
 
       local port_display
-      [ "$frontend" != "null" ] && [ -n "$frontend" ] && port_display=":$frontend" || port_display="-"
+      if [ "$frontend" != "null" ] && [ -n "$frontend" ]; then
+        port_display=$(hyperlink "http://$ip:$frontend" ":$frontend")
+      else
+        port_display="-"
+      fi
 
       echo -e "  $status_icon ${BOLD}$name${NC} ${DIM}($status_word)${NC}"
-      echo -e "    ${DIM}$agent · $port_display · $age · $branch_display${NC}"
+      printf "    ${DIM}$agent · %s · $age · $branch_display${NC}\n" "$port_display"
     done <<< "$sessions"
   else
     # Full table for wide terminals
@@ -1360,11 +1371,28 @@ cmd_ls() {
       branch_display=$(echo "$branch" | cut -c1-10)
 
       local front_display back_display
-      [ "$frontend" != "null" ] && [ -n "$frontend" ] && front_display=":$frontend" || front_display="-"
-      [ "$backend" != "null" ] && [ -n "$backend" ] && back_display=":$backend" || back_display="-"
+      if [ "$frontend" != "null" ] && [ -n "$frontend" ]; then
+        front_display=$(hyperlink "http://$ip:$frontend" ":$frontend")
+      else
+        front_display="-"
+      fi
+      if [ "$backend" != "null" ] && [ -n "$backend" ]; then
+        back_display=$(hyperlink "http://$ip:$backend" ":$backend")
+      else
+        back_display="-"
+      fi
 
-      printf "  %-30s %-10s %-14s %-8s %-8s %-10s %-6s " \
-        "$name" "$owner" "$agent" "$front_display" "$back_display" "$branch_display" "$age"
+      # Hyperlinks contain invisible escape sequences, so we can't use %-8s formatting
+      # directly. Print the fixed-width columns first, then the hyperlink columns manually.
+      printf "  %-30s %-10s %-14s " "$name" "$owner" "$agent"
+      # Pad the hyperlink fields to 8 chars visible width
+      local front_text back_text
+      [ "$frontend" != "null" ] && [ -n "$frontend" ] && front_text=":$frontend" || front_text="-"
+      [ "$backend" != "null" ] && [ -n "$backend" ] && back_text=":$backend" || back_text="-"
+      local front_pad=$((8 - ${#front_text}))
+      local back_pad=$((8 - ${#back_text}))
+      printf "%s%*s%s%*s" "$front_display" "$front_pad" "" "$back_display" "$back_pad" ""
+      printf "%-10s %-6s " "$branch_display" "$age"
       echo -e "$status"
     done <<< "$sessions"
   fi
