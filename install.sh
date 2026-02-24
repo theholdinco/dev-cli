@@ -286,6 +286,12 @@ _dev() {
     return 0
   fi
 
+  # new flags (after project and branch args)
+  if [ "$cmd" = "new" ] && [ "$COMP_CWORD" -ge 4 ]; then
+    COMPREPLY=( $(compgen -W "--agent --agents --from --yolo --attach --run --private --container --env" -- "$cur") )
+    return 0
+  fi
+
   # kill flags
   if [ "$cmd" = "kill" ]; then
     COMPREPLY=( $(compgen -W "--all --project" -- "$cur") )

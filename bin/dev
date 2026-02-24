@@ -524,6 +524,159 @@ ENVEOF
   log "Generated $env_file (slot $slot: frontend=$frontend, backend=$backend)"
 }
 
+# ── Devcontainer Support ────────────────────────────────────────────────────
+
+# Generate a default .devcontainer/devcontainer.json if one doesn't exist in the worktree.
+# Respects existing devcontainer configs committed to the project repo.
+ensure_devcontainer_json() {
+  local worktree_path="$1" project="$2" pass_env="$3"
+  local dc_dir="$worktree_path/.devcontainer"
+  local dc_file="$dc_dir/devcontainer.json"
+
+  # If project already has a devcontainer config, use it as-is
+  if [ -f "$dc_file" ] || [ -f "$worktree_path/.devcontainer.json" ]; then
+    info "Using existing devcontainer config"
+    return 0
+  fi
+
+  mkdir -p "$dc_dir"
+
+  # Build containerEnv block — always include DEV_* vars
+  local env_block='"DEV_PROJECT": "'"$DEV_PROJECT"'", "DEV_BRANCH": "'"$DEV_BRANCH"'"'
+  [ -n "${DEV_FRONTEND_PORT:-}" ] && env_block="$env_block, \"DEV_FRONTEND_PORT\": \"$DEV_FRONTEND_PORT\""
+  [ -n "${DEV_BACKEND_PORT:-}" ] && env_block="$env_block, \"DEV_BACKEND_PORT\": \"$DEV_BACKEND_PORT\""
+
+  # If --env requested, pass secrets via localEnv references
+  local remote_env_block=""
+  if [ "$pass_env" = true ] && [ -f "$SECRETS_FILE" ]; then
+    # Read each VAR=value line from secrets.env and create localEnv references
+    local env_entries=""
+    while IFS='=' read -r key _; do
+      [[ "$key" =~ ^#.*$ ]] && continue
+      [[ -z "$key" ]] && continue
+      key=$(echo "$key" | xargs)
+      [ -n "$env_entries" ] && env_entries="$env_entries,"
+      env_entries="$env_entries
+      \"$key\": \"\${localEnv:$key}\""
+    done < "$SECRETS_FILE"
+    if [ -n "$env_entries" ]; then
+      remote_env_block=",
+    \"remoteEnv\": {${env_entries}
+    }"
+    fi
+  fi
+
+  cat > "$dc_file" << DCEOF
+{
+  "name": "${project}-session",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "20" },
+    "ghcr.io/devcontainers/features/git:1": {}
+  },
+  "containerEnv": { ${env_block} },
+  "mounts": [
+    "source=\${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind,readonly",
+    "source=\${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,readonly"
+  ],
+  "remoteUser": "vscode",
+  "init": true,
+  "shutdownAction": "none",
+  "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.ssh 2>/dev/null || true"${remote_env_block}
+}
+DCEOF
+
+  # Don't commit generated devcontainer config
+  if [ -f "$worktree_path/.gitignore" ]; then
+    if ! grep -q "^\.devcontainer/$" "$worktree_path/.gitignore" 2>/dev/null; then
+      echo ".devcontainer/" >> "$worktree_path/.gitignore"
+    fi
+  fi
+
+  log "Generated devcontainer config at $dc_file"
+}
+
+# Start a devcontainer for a worktree. Returns the container ID.
+start_devcontainer() {
+  local worktree_path="$1" session_name="$2" pass_env="$3"
+
+  info "Building and starting devcontainer..."
+
+  # Build devcontainer up command with remote env vars
+  local dc_cmd="devcontainer up --workspace-folder \"$worktree_path\""
+  dc_cmd="$dc_cmd --id-label \"dev-cli.session=${session_name}\""
+
+  # If --env, source secrets and pass them via --remote-env
+  if [ "$pass_env" = true ] && [ -f "$SECRETS_FILE" ]; then
+    while IFS='=' read -r key value; do
+      [[ "$key" =~ ^#.*$ ]] && continue
+      [[ -z "$key" ]] && continue
+      key=$(echo "$key" | xargs)
+      value=$(echo "$value" | xargs)
+      # Remove surrounding quotes if present
+      value="${value#\"}"
+      value="${value%\"}"
+      value="${value#\'}"
+      value="${value%\'}"
+      dc_cmd="$dc_cmd --remote-env \"${key}=${value}\""
+    done < "$SECRETS_FILE"
+  fi
+
+  local result
+  result=$(eval "$dc_cmd" 2>&1) || {
+    die "devcontainer up failed: $result"
+  }
+
+  local outcome container_id
+  outcome=$(echo "$result" | jq -r '.outcome // empty' 2>/dev/null)
+  container_id=$(echo "$result" | jq -r '.containerId // empty' 2>/dev/null)
+
+  if [ "$outcome" != "success" ] || [ -z "$container_id" ]; then
+    die "devcontainer up did not succeed: $result"
+  fi
+
+  log "Container started: ${container_id:0:12}"
+  echo "$container_id"
+}
+
+# Build a command prefix for executing inside a devcontainer.
+# Usage: prefix=$(build_container_exec_cmd "$container_id")
+#        tmux new-session -d -s name "$prefix bash"
+build_container_exec_cmd() {
+  local container_id="$1"
+  echo "docker exec -it $container_id"
+}
+
+# Stop and remove a session's devcontainer.
+stop_devcontainer() {
+  local session_name="$1" container_id="$2"
+
+  if [ -n "$container_id" ]; then
+    info "Stopping devcontainer ${container_id:0:12}..."
+    docker stop "$container_id" >/dev/null 2>&1 || true
+    docker rm "$container_id" >/dev/null 2>&1 || true
+    log "Container removed"
+  else
+    # Fallback: find by label
+    local cid
+    cid=$(docker ps -aq --filter "label=dev-cli.session=${session_name}" 2>/dev/null | head -1)
+    if [ -n "$cid" ]; then
+      info "Stopping devcontainer ${cid:0:12}..."
+      docker stop "$cid" >/dev/null 2>&1 || true
+      docker rm "$cid" >/dev/null 2>&1 || true
+      log "Container removed"
+    fi
+  fi
+}
+
+# Get the remote workspace folder path inside the container.
+get_container_workspace() {
+  local worktree_path="$1"
+  local dir_name
+  dir_name=$(basename "$worktree_path")
+  echo "/workspaces/$dir_name"
+}
+
 # ── Supabase Config ─────────────────────────────────────────────────────────
 
 patch_supabase_config() {
@@ -987,7 +1140,7 @@ cmd_setup() {
 }
 
 cmd_new() {
-  local project="${2:-}" branch="${3:-}" agent="" agents_flag="" run_cmd="" yolo=false attach=false from_branch="" private=false
+  local project="${2:-}" branch="${3:-}" agent="" agents_flag="" run_cmd="" yolo=false attach=false from_branch="" private=false container=false container_env=false
   shift 2 || true
 
   # Parse options
@@ -1004,6 +1157,8 @@ cmd_new() {
       --yolo) yolo=true; shift ;;
       --attach) attach=true; shift ;;
       --private) private=true; shift ;;
+      --container) container=true; shift ;;
+      --env) container_env=true; shift ;;
       *) shift ;;
     esac
   done
@@ -1032,8 +1187,33 @@ cmd_new() {
     [ "$config_yolo" = "true" ] && yolo=true
   fi
 
-  [ -z "$project" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--private]"
-  [ -z "$branch" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--private]"
+  # Resolve container: --container flag > project config
+  if [ "$container" != true ] && [ -n "$project" ] && [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
+    local config_container
+    config_container=$(jq -r '.use_container // false' "$CONFIG_DIR/projects/${project}.json" 2>/dev/null)
+    [ "$config_container" = "true" ] && container=true
+  fi
+
+  # Resolve container_env: --env flag > project config
+  if [ "$container_env" != true ] && [ "$container" = true ] && [ -n "$project" ] && [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
+    local config_container_env
+    config_container_env=$(jq -r '.container_env // false' "$CONFIG_DIR/projects/${project}.json" 2>/dev/null)
+    [ "$config_container_env" = "true" ] && container_env=true
+  fi
+
+  # --env only makes sense with --container
+  if [ "$container_env" = true ] && [ "$container" != true ]; then
+    warn "--env flag is only used with --container, ignoring"
+    container_env=false
+  fi
+
+  # Container mode requires devcontainer CLI
+  if [ "$container" = true ] && ! command -v devcontainer &>/dev/null; then
+    die "devcontainer CLI not found. Install it with: npm install -g @devcontainers/cli"
+  fi
+
+  [ -z "$project" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--container] [--env] [--private]"
+  [ -z "$branch" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--container] [--env] [--private]"
 
   local bare_dir="$PROJECTS_DIR/$project"
   local wt_dir="$PROJECTS_DIR/${project}-worktrees"
@@ -1143,29 +1323,31 @@ cmd_new() {
     patch_supabase_config "$worktree_path" "$slot"
   fi
 
-  # Install dependencies
-  info "Installing dependencies..."
-  cd "$worktree_path"
+  # Install dependencies (skip for container mode — handled inside container)
+  if [ "$container" != true ]; then
+    info "Installing dependencies..."
+    cd "$worktree_path"
 
-  # Detect package manager: lockfile first, then project config, then npm
-  local pkg_mgr=""
-  if [ -f "pnpm-lock.yaml" ]; then
-    pkg_mgr="pnpm"
-  elif [ -f "yarn.lock" ]; then
-    pkg_mgr="yarn"
-  elif [ -f "package-lock.json" ]; then
-    pkg_mgr="npm"
-  elif [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
-    pkg_mgr=$(jq -r '.pkg_manager // "npm"' "$CONFIG_DIR/projects/${project}.json")
-  else
-    pkg_mgr="npm"
-  fi
+    # Detect package manager: lockfile first, then project config, then npm
+    local pkg_mgr=""
+    if [ -f "pnpm-lock.yaml" ]; then
+      pkg_mgr="pnpm"
+    elif [ -f "yarn.lock" ]; then
+      pkg_mgr="yarn"
+    elif [ -f "package-lock.json" ]; then
+      pkg_mgr="npm"
+    elif [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
+      pkg_mgr=$(jq -r '.pkg_manager // "npm"' "$CONFIG_DIR/projects/${project}.json")
+    else
+      pkg_mgr="npm"
+    fi
 
-  if [ -f "package.json" ]; then
-    $pkg_mgr install 2>&1 | tail -3
-    log "Dependencies installed ($pkg_mgr)"
-  else
-    warn "No package.json found, skipping install"
+    if [ -f "package.json" ]; then
+      $pkg_mgr install 2>&1 | tail -3
+      log "Dependencies installed ($pkg_mgr)"
+    else
+      warn "No package.json found, skipping install"
+    fi
   fi
 
   # Resolve run command: --run flag > project config > none
@@ -1173,8 +1355,39 @@ cmd_new() {
     run_cmd=$(jq -r '.run_cmd // empty' "$CONFIG_DIR/projects/${project}.json")
   fi
 
-  # Register in port registry
+  # ── Devcontainer setup (when --container is used) ────────────────────────
+  local container_id=""
+  local container_exec_prefix=""
+  local container_workspace=""
+
+  if [ "$container" = true ]; then
+    # Generate devcontainer.json if the project doesn't have one
+    ensure_devcontainer_json "$worktree_path" "$project" "$container_env"
+
+    # Start the devcontainer
+    container_id=$(start_devcontainer "$worktree_path" "$name" "$container_env")
+    container_exec_prefix=$(build_container_exec_cmd "$container_id")
+    container_workspace=$(get_container_workspace "$worktree_path")
+  fi
+
+  # Register in port registry (include container_id if present)
   register_session "$name" "$project" "$branch" "$slot" "$agent" "$worktree_path" "$private"
+
+  # Store container info in registry if container mode
+  if [ -n "$container_id" ]; then
+    (
+      flock -x 200
+      local tmp
+      tmp=$(mktemp)
+      jq --arg name "$name" \
+         --arg cid "$container_id" \
+         --argjson cenv "$container_env" \
+         '.[$name].container_id = $cid | .[$name].use_container = true | .[$name].container_env = $cenv' \
+         "$PORT_REGISTRY" > "$tmp"
+      mv -f "$tmp" "$PORT_REGISTRY"
+      fix_registry_perms
+    ) 200>"${PORT_REGISTRY}.lock"
+  fi
 
   # Source secrets
   local env_prefix=""
@@ -1192,20 +1405,39 @@ cmd_new() {
   [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
 
   local agent_cmd
-  case "$primary_agent" in
-    claude)
-      agent_cmd="cd $worktree_path && claude${claude_flags}"
-      ;;
-    codex)
-      agent_cmd="cd $worktree_path && codex"
-      ;;
-    none)
-      agent_cmd="cd $worktree_path && echo 'Ready. No agent started.' && bash"
-      ;;
-    *)
-      die "Unknown agent: $primary_agent. Use claude, codex, or none."
-      ;;
-  esac
+  if [ -n "$container_exec_prefix" ]; then
+    # Container mode: exec into container for agent commands
+    case "$primary_agent" in
+      claude)
+        agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && claude${claude_flags}'"
+        ;;
+      codex)
+        agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && codex'"
+        ;;
+      none)
+        agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && echo Ready. && bash'"
+        ;;
+      *)
+        die "Unknown agent: $primary_agent. Use claude, codex, or none."
+        ;;
+    esac
+  else
+    # Normal mode: run directly on host
+    case "$primary_agent" in
+      claude)
+        agent_cmd="cd $worktree_path && claude${claude_flags}"
+        ;;
+      codex)
+        agent_cmd="cd $worktree_path && codex"
+        ;;
+      none)
+        agent_cmd="cd $worktree_path && echo 'Ready. No agent started.' && bash"
+        ;;
+      *)
+        die "Unknown agent: $primary_agent. Use claude, codex, or none."
+        ;;
+    esac
+  fi
 
   # Set port env vars on tmux session so all windows/panes inherit them.
   local ip
@@ -1220,11 +1452,19 @@ cmd_new() {
   if [ ${#agent_list[@]} -gt 1 ]; then
     for extra_agent in "${agent_list[@]:1}"; do
       local extra_cmd
-      case "$extra_agent" in
-        claude) extra_cmd="cd $worktree_path && claude${claude_flags}" ;;
-        codex)  extra_cmd="cd $worktree_path && codex" ;;
-        *)      warn "Unknown agent '$extra_agent', skipping"; continue ;;
-      esac
+      if [ -n "$container_exec_prefix" ]; then
+        case "$extra_agent" in
+          claude) extra_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && claude${claude_flags}'" ;;
+          codex)  extra_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && codex'" ;;
+          *)      warn "Unknown agent '$extra_agent', skipping"; continue ;;
+        esac
+      else
+        case "$extra_agent" in
+          claude) extra_cmd="cd $worktree_path && claude${claude_flags}" ;;
+          codex)  extra_cmd="cd $worktree_path && codex" ;;
+          *)      warn "Unknown agent '$extra_agent', skipping"; continue ;;
+        esac
+      fi
       tmux new-window -t "$name" -n "agent-${extra_agent}" "${env_prefix}${extra_cmd}"
       info "Added agent window: agent-${extra_agent}"
     done
@@ -1244,6 +1484,9 @@ cmd_new() {
   echo -e "  ${BOLD}Agent(s):${NC} $agent"
   echo -e "  ${BOLD}Branch:${NC}   $branch"
   echo -e "  ${BOLD}Path:${NC}     $worktree_path"
+  if [ "$container" = true ]; then
+    echo -e "  ${BOLD}Container:${NC} ${container_id:0:12} (devcontainer)"
+  fi
   if [ "$wt_frontend" != "null" ]; then
     echo -e "  ${BOLD}Frontend:${NC} http://$ip:$wt_frontend"
   fi
@@ -1684,6 +1927,13 @@ cmd_kill() {
 
   # Kill tmux session
   tmux kill-session -t "$name" 2>/dev/null && log "Killed tmux session" || warn "tmux session already gone"
+
+  # Stop devcontainer if present
+  local container_id
+  container_id=$(get_session_field "$name" "container_id")
+  if [ -n "$container_id" ]; then
+    stop_devcontainer "$name" "$container_id"
+  fi
 
   # Ghost sessions have no repo — just clean up the directory and unregister
   if [ "$session_type" = "ghost" ]; then
@@ -2432,6 +2682,19 @@ cmd_status() {
   echo -e "  Branch:   $branch"
   echo -e "  Age:      $age"
   echo -e "  Path:     $worktree_path"
+
+  # Container status
+  local cid
+  cid=$(get_session_field "$match" "container_id")
+  if [ -n "$cid" ]; then
+    local cstatus
+    cstatus=$(docker inspect "$cid" --format '{{.State.Status}}' 2>/dev/null || echo "not found")
+    if [ "$cstatus" = "running" ]; then
+      echo -e "  Container: ${GREEN}${cid:0:12} ($cstatus)${NC}"
+    else
+      echo -e "  Container: ${RED}${cid:0:12} ($cstatus)${NC}"
+    fi
+  fi
   echo ""
 
   # Git status
@@ -2748,7 +3011,7 @@ cmd_doctor() {
 
   # Check required tools
   echo -e "  ${BOLD}Tools${NC}"
-  for tool in jq tmux git gh lazygit delta docker tailscale; do
+  for tool in jq tmux git gh lazygit delta docker tailscale devcontainer; do
     if command -v "$tool" &>/dev/null; then
       echo -e "  ${GREEN}✓${NC} $tool $(command -v "$tool")"
       ok=$((ok + 1))
@@ -2932,14 +3195,48 @@ cmd_restart() {
   local claude_flags=""
   [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
 
+  # Check if session uses a devcontainer
+  local container_id container_exec_prefix="" container_workspace=""
+  container_id=$(get_session_field "$match" "container_id")
+  if [ -n "$container_id" ]; then
+    # Ensure container is running, restart it if needed
+    if ! docker inspect "$container_id" --format '{{.State.Status}}' 2>/dev/null | grep -q "running"; then
+      info "Restarting devcontainer..."
+      local container_env_flag
+      container_env_flag=$(get_session_field "$match" "container_env")
+      container_id=$(start_devcontainer "$worktree_path" "$match" "${container_env_flag:-false}")
+      # Update registry with new container ID
+      (
+        flock -x 200
+        local tmp
+        tmp=$(mktemp)
+        jq --arg name "$match" --arg cid "$container_id" \
+           '.[$name].container_id = $cid' "$PORT_REGISTRY" > "$tmp"
+        mv -f "$tmp" "$PORT_REGISTRY"
+        fix_registry_perms
+      ) 200>"${PORT_REGISTRY}.lock"
+    fi
+    container_exec_prefix=$(build_container_exec_cmd "$container_id")
+    container_workspace=$(get_container_workspace "$worktree_path")
+  fi
+
   # Recreate tmux session with primary agent
   local agent_cmd
-  case "$primary_agent" in
-    claude) agent_cmd="cd $worktree_path && claude${claude_flags}" ;;
-    codex)  agent_cmd="cd $worktree_path && codex" ;;
-    none)   agent_cmd="cd $worktree_path && echo 'Ready. No agent started.' && bash" ;;
-    *)      agent_cmd="cd $worktree_path && bash" ;;
-  esac
+  if [ -n "$container_exec_prefix" ]; then
+    case "$primary_agent" in
+      claude) agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && claude${claude_flags}'" ;;
+      codex)  agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && codex'" ;;
+      none)   agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && echo Ready. && bash'" ;;
+      *)      agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && bash'" ;;
+    esac
+  else
+    case "$primary_agent" in
+      claude) agent_cmd="cd $worktree_path && claude${claude_flags}" ;;
+      codex)  agent_cmd="cd $worktree_path && codex" ;;
+      none)   agent_cmd="cd $worktree_path && echo 'Ready. No agent started.' && bash" ;;
+      *)      agent_cmd="cd $worktree_path && bash" ;;
+    esac
+  fi
 
   local ip
   ip=$(get_ip)
@@ -2952,11 +3249,19 @@ cmd_restart() {
   if [ ${#agent_list[@]} -gt 1 ]; then
     for extra_agent in "${agent_list[@]:1}"; do
       local extra_cmd
-      case "$extra_agent" in
-        claude) extra_cmd="cd $worktree_path && claude${claude_flags}" ;;
-        codex)  extra_cmd="cd $worktree_path && codex" ;;
-        *)      warn "Unknown agent '$extra_agent', skipping"; continue ;;
-      esac
+      if [ -n "$container_exec_prefix" ]; then
+        case "$extra_agent" in
+          claude) extra_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && claude${claude_flags}'" ;;
+          codex)  extra_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && codex'" ;;
+          *)      warn "Unknown agent '$extra_agent', skipping"; continue ;;
+        esac
+      else
+        case "$extra_agent" in
+          claude) extra_cmd="cd $worktree_path && claude${claude_flags}" ;;
+          codex)  extra_cmd="cd $worktree_path && codex" ;;
+          *)      warn "Unknown agent '$extra_agent', skipping"; continue ;;
+        esac
+      fi
       tmux new-window -t "$match" -n "agent-${extra_agent}" "${env_prefix}${extra_cmd}"
     done
   fi
@@ -3251,6 +3556,30 @@ cmd_config() {
         new_run="${new_run:-$cur_run}"
 
         echo ""
+        local cur_container="" cur_container_env=""
+        if [ -f "$pconfig" ]; then
+          cur_container=$(jq -r '.use_container // false' "$pconfig")
+          cur_container_env=$(jq -r '.container_env // false' "$pconfig")
+        fi
+        local default_container="n"
+        [ "${cur_container:-false}" = "true" ] && default_container="y"
+        read -rp "  Use devcontainer for isolation (y/n) [$default_container]: " container_choice
+        local use_container=false
+        case "${container_choice:-$default_container}" in
+          y|Y|yes) use_container=true ;;
+        esac
+
+        local use_container_env=false
+        if [ "$use_container" = true ]; then
+          local default_container_env="n"
+          [ "${cur_container_env:-false}" = "true" ] && default_container_env="y"
+          read -rp "  Pass secrets.env into container (y/n) [$default_container_env]: " container_env_choice
+          case "${container_env_choice:-$default_container_env}" in
+            y|Y|yes) use_container_env=true ;;
+          esac
+        fi
+
+        echo ""
         echo -e "  Tmux window layout (leave blank to use global config):"
         read -rp "  Custom window names (comma-separated, e.g. agent,shell,server,logs) []: " win_input
 
@@ -3264,7 +3593,9 @@ cmd_config() {
           --arg agent "$def_agent" \
           --arg run "$new_run" \
           --argjson yolo "$skip_perms" \
-          '.pkg_manager = $pkg | .default_agent = $agent | .skip_permissions = $yolo | (if $run != "" then .run_cmd = $run else del(.run_cmd) end)' > "$tmp"
+          --argjson use_container "$use_container" \
+          --argjson container_env "$use_container_env" \
+          '.pkg_manager = $pkg | .default_agent = $agent | .skip_permissions = $yolo | .use_container = $use_container | .container_env = $container_env | (if $run != "" then .run_cmd = $run else del(.run_cmd) end)' > "$tmp"
 
         if [ -n "$win_input" ]; then
           local windows_json="["
@@ -3488,12 +3819,24 @@ cmd_agent() {
       fi
       [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
 
-      # Build agent command
+      # Build agent command (container-aware)
       local agent_cmd
-      case "$agent_type" in
-        claude) agent_cmd="cd $worktree_path && claude${claude_flags}" ;;
-        codex)  agent_cmd="cd $worktree_path && codex" ;;
-      esac
+      local cid
+      cid=$(get_session_field "$match" "container_id")
+      if [ -n "$cid" ]; then
+        local cprefix cworkspace
+        cprefix=$(build_container_exec_cmd "$cid")
+        cworkspace=$(get_container_workspace "$worktree_path")
+        case "$agent_type" in
+          claude) agent_cmd="$cprefix bash -lc 'cd $cworkspace && claude${claude_flags}'" ;;
+          codex)  agent_cmd="$cprefix bash -lc 'cd $cworkspace && codex'" ;;
+        esac
+      else
+        case "$agent_type" in
+          claude) agent_cmd="cd $worktree_path && claude${claude_flags}" ;;
+          codex)  agent_cmd="cd $worktree_path && codex" ;;
+        esac
+      fi
 
       # Create new tmux window named agent-<type>
       tmux new-window -t "$match" -n "agent-${agent_type}" "${env_prefix}${agent_cmd}"
@@ -4956,7 +5299,7 @@ cmd_help() {
     dev help                                Show this help
 
   SESSIONS
-    dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--run "<cmd>"] [--private]
+    dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--run "<cmd>"] [--private] [--container] [--env]
                                             Create worktree + start agent(s)
                                             --from base the new branch off a specific branch (instead of main)
                                             --agents starts multiple agents (comma-separated)
@@ -4964,6 +5307,8 @@ cmd_help() {
                                             --attach auto-attach to the session after creation
                                             --run auto-starts a command in the server window
                                             --private hide session from other users' listings
+                                            --container run agent inside a devcontainer (sandboxed)
+                                            --env pass host secrets.env into the container (only with --container)
     dev ls                                  List your active sessions
     dev ls --all                              List all users' sessions
     dev attach [session] [--all]             Attach to tmux session (interactive picker if no arg, shows only your sessions by default)
@@ -5092,6 +5437,13 @@ cmd_help() {
     dev services status                     Show service status
     dev services logs [web|bot|task-runner]  Follow service logs
 
+  DEVCONTAINER (sandboxed agent sessions)
+    --container                             Run the agent inside a devcontainer
+    --env                                   Copy secrets.env vars into the container
+    Project config: "use_container": true, "container_env": true
+    Uses existing .devcontainer/devcontainer.json if present, or generates one.
+    Requires: npm install -g @devcontainers/cli
+
   SETUP HOOKS (checked in priority order)
     1. <worktree>/.dev/setup.sh             In-repo hook (travels with the code)
     2. ~/.config/dev-cli/hooks/<project>/setup.sh
@@ -5110,6 +5462,8 @@ cmd_help() {
     dev new klyra feat/trading-ui --agent claude
     dev new klyra feat/trading-ui --yolo
     dev new klyra fix/auth-bug --agents claude,codex
+    dev new klyra refactor/api --container --yolo  # sandboxed agent, safe to skip perms
+    dev new klyra fix/db --container --env --yolo  # container + host secrets passed in
     dev pr-start klyra 42                         # start session from PR #42
     dev pr-start klyra 42 --yolo --attach        # start from PR, skip perms, attach
     dev pr-start klyra https://github.com/org/klyra/pull/42  # start from PR URL
