@@ -5136,7 +5136,6 @@ ensure_dirs
 
 case "${1:-help}" in
   setup)     cmd_setup "$@" ;;
-  init)      cmd_setup "$@" ;;  # legacy alias
   new)       cmd_new "$@" ;;
   ls|list)   cmd_ls "$@" ;;
   attach|a)  cmd_attach "$@" ;;
