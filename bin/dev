@@ -560,13 +560,23 @@ patch_supabase_config() {
 
 # ── Commands ────────────────────────────────────────────────────────────────
 
-cmd_init() {
+cmd_setup() {
+  local project="${2:-}" url="${3:-}"
+
   echo ""
-  echo -e "  ${BOLD}Initialize a new project${NC}"
+  echo -e "  ${BOLD}Set up a new project${NC}"
   echo ""
 
-  # Project name
-  local project=""
+  # Sanitize project name if passed as arg
+  if [ -n "$project" ]; then
+    project=$(echo "$project" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g')
+    [ -z "$project" ] && die "Invalid project name (must contain alphanumeric characters or hyphens)"
+    if [ -d "$PROJECTS_DIR/$project" ]; then
+      die "Project '$project' already exists at $PROJECTS_DIR/$project"
+    fi
+  fi
+
+  # Project name (interactive prompt if not provided)
   while [ -z "$project" ]; do
     read -rp "  Project name (short, no spaces, e.g. klyra): " project
     project=$(echo "$project" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g')
@@ -582,9 +592,13 @@ cmd_init() {
     fi
   done
 
-  # GitHub URL
-  local url=""
-  if [ ! -d "$PROJECTS_DIR/$project" ]; then
+  # Validate URL if passed as arg
+  if [ -n "$url" ] && [[ ! "$url" =~ ^git@|^https:// ]]; then
+    die "Invalid git URL: $url (must start with git@ or https://)"
+  fi
+
+  # GitHub URL (interactive prompt if not provided)
+  if [ -z "$url" ] && [ ! -d "$PROJECTS_DIR/$project" ]; then
     while [ -z "$url" ]; do
       read -rp "  GitHub URL (SSH or HTTPS, e.g. git@github.com:org/repo.git): " url
       if [ -z "$url" ]; then
@@ -596,98 +610,110 @@ cmd_init() {
     done
   fi
 
-  # Stack detection
+  # Quick vs detailed setup
   echo ""
-  echo -e "  ${BOLD}Stack configuration${NC}"
-  echo ""
+  echo -e "  ${BOLD}Setup mode${NC}"
+  echo "  1) Quick setup (use defaults, configure later)"
+  echo "  2) Detailed setup (configure stack, env vars, etc.)"
+  local setup_mode=""
+  read -rp "  Select [1]: " setup_mode
+  setup_mode=${setup_mode:-1}
 
-  local has_nextjs="y" has_backend="n" has_supabase="y"
+  local has_nextjs="no" has_backend="no" has_supabase="no"
   local pkg_manager="npm"
-
-  read -rp "  Has Next.js frontend? [Y/n]: " has_nextjs
-  has_nextjs=${has_nextjs:-y}
-
-  read -rp "  Has Express/Node backend? [y/N]: " has_backend
-  has_backend=${has_backend:-n}
-
-  read -rp "  Uses Supabase? [Y/n]: " has_supabase
-  has_supabase=${has_supabase:-y}
-
-  echo ""
-  echo -e "  ${BOLD}Package manager${NC}"
-  echo "  1) npm"
-  echo "  2) pnpm"
-  echo "  3) yarn"
-  read -rp "  Select [1]: " pm_choice
-  case "${pm_choice:-1}" in
-    2) pkg_manager="pnpm" ;;
-    3) pkg_manager="yarn" ;;
-    *) pkg_manager="npm" ;;
-  esac
-
-  # Dev server command
-  echo ""
-  echo -e "  ${BOLD}Dev server command${NC}"
-  echo -e "  ${DIM}Command to auto-run in the server window (e.g., pnpm dev, npm run dev)${NC}"
-  echo -e "  ${DIM}Leave empty to skip (you can always start it manually)${NC}"
   local run_cmd=""
-  read -rp "  Run command: " run_cmd
-
-  # Monorepo detection
   local is_monorepo="n"
   local packages=()
+  local extra_vars=()
+  declare -A pkg_vars
 
-  echo ""
-  read -rp "  Is this a monorepo with multiple packages? [y/N]: " is_monorepo
-  is_monorepo=${is_monorepo:-n}
-
-  if [[ "$is_monorepo" =~ ^[Yy] ]]; then
+  if [ "$setup_mode" = "2" ]; then
+    # Stack detection
     echo ""
-    echo -e "  ${BOLD}Package paths that need their own .env${NC}"
-    echo -e "  ${DIM}Enter relative paths from repo root (e.g., packages/web, packages/api)${NC}"
+    echo -e "  ${BOLD}Stack configuration${NC}"
+    echo ""
+
+    has_nextjs="y" has_backend="n" has_supabase="y"
+
+    read -rp "  Has Next.js frontend? [Y/n]: " has_nextjs
+    has_nextjs=${has_nextjs:-y}
+
+    read -rp "  Has Express/Node backend? [y/N]: " has_backend
+    has_backend=${has_backend:-n}
+
+    read -rp "  Uses Supabase? [Y/n]: " has_supabase
+    has_supabase=${has_supabase:-y}
+
+    echo ""
+    echo -e "  ${BOLD}Package manager${NC}"
+    echo "  1) npm"
+    echo "  2) pnpm"
+    echo "  3) yarn"
+    read -rp "  Select [1]: " pm_choice
+    case "${pm_choice:-1}" in
+      2) pkg_manager="pnpm" ;;
+      3) pkg_manager="yarn" ;;
+      *) pkg_manager="npm" ;;
+    esac
+
+    # Dev server command
+    echo ""
+    echo -e "  ${BOLD}Dev server command${NC}"
+    echo -e "  ${DIM}Command to auto-run in the server window (e.g., pnpm dev, npm run dev)${NC}"
+    echo -e "  ${DIM}Leave empty to skip (you can always start it manually)${NC}"
+    read -rp "  Run command: " run_cmd
+
+    # Monorepo detection
+    echo ""
+    read -rp "  Is this a monorepo with multiple packages? [y/N]: " is_monorepo
+    is_monorepo=${is_monorepo:-n}
+
+    if [[ "$is_monorepo" =~ ^[Yy] ]]; then
+      echo ""
+      echo -e "  ${BOLD}Package paths that need their own .env${NC}"
+      echo -e "  ${DIM}Enter relative paths from repo root (e.g., packages/web, packages/api)${NC}"
+      echo -e "  ${DIM}Press Enter on empty line when done${NC}"
+      echo ""
+      while true; do
+        read -rp "  > " pkg_path
+        [ -z "$pkg_path" ] && break
+        packages+=("$pkg_path")
+      done
+
+      if [ ${#packages[@]} -eq 0 ]; then
+        warn "No packages entered, treating as standard repo"
+        is_monorepo="n"
+      fi
+    fi
+
+    # Extra env vars
+    echo ""
+    echo -e "  ${BOLD}Extra environment variables${NC} (shared across all packages)"
+    echo -e "  ${DIM}Add any project-specific vars (one per line, KEY=VALUE format)${NC}"
     echo -e "  ${DIM}Press Enter on empty line when done${NC}"
     echo ""
+
     while true; do
-      read -rp "  > " pkg_path
-      [ -z "$pkg_path" ] && break
-      packages+=("$pkg_path")
+      read -rp "  > " var_line
+      [ -z "$var_line" ] && break
+      extra_vars+=("$var_line")
     done
 
-    if [ ${#packages[@]} -eq 0 ]; then
-      warn "No packages entered, treating as standard repo"
-      is_monorepo="n"
-    fi
-  fi
-
-  # Extra env vars
-  echo ""
-  echo -e "  ${BOLD}Extra environment variables${NC} (shared across all packages)"
-  echo -e "  ${DIM}Add any project-specific vars (one per line, KEY=VALUE format)${NC}"
-  echo -e "  ${DIM}Press Enter on empty line when done${NC}"
-  echo ""
-
-  local extra_vars=()
-  while true; do
-    read -rp "  > " var_line
-    [ -z "$var_line" ] && break
-    extra_vars+=("$var_line")
-  done
-
-  # Per-package env vars for monorepos
-  declare -A pkg_vars
-  if [[ "$is_monorepo" =~ ^[Yy] ]]; then
-    for pkg in "${packages[@]}"; do
-      echo ""
-      echo -e "  ${BOLD}Extra env vars for ${CYAN}$pkg${NC}"
-      echo -e "  ${DIM}Press Enter on empty line when done${NC}"
-      local this_pkg_vars=""
-      while true; do
-        read -rp "  $pkg> " var_line
-        [ -z "$var_line" ] && break
-        this_pkg_vars+="$var_line"$'\n'
+    # Per-package env vars for monorepos
+    if [[ "$is_monorepo" =~ ^[Yy] ]]; then
+      for pkg in "${packages[@]}"; do
+        echo ""
+        echo -e "  ${BOLD}Extra env vars for ${CYAN}$pkg${NC}"
+        echo -e "  ${DIM}Press Enter on empty line when done${NC}"
+        local this_pkg_vars=""
+        while true; do
+          read -rp "  $pkg> " var_line
+          [ -z "$var_line" ] && break
+          this_pkg_vars+="$var_line"$'\n'
+        done
+        pkg_vars["$pkg"]="$this_pkg_vars"
       done
-      pkg_vars["$pkg"]="$this_pkg_vars"
-    done
+    fi
   fi
 
   # ── Execute setup ─────────────────────────────────────────
@@ -695,7 +721,7 @@ cmd_init() {
   echo ""
   info "Setting up project '$project'..."
 
-  # Clone repo (reuse cmd_setup logic)
+  # Clone repo
   if [ -n "$url" ] && [ ! -d "$PROJECTS_DIR/$project" ]; then
     local bare_dir="$PROJECTS_DIR/$project"
     local wt_dir="$PROJECTS_DIR/${project}-worktrees"
@@ -726,7 +752,7 @@ cmd_init() {
 #!/usr/bin/env bash
 ###############################################################################
 # Project setup hook (monorepo)
-# Auto-generated by dev init. Runs after worktree creation.
+# Auto-generated by dev setup. Runs after worktree creation.
 #
 # Available env vars (set by dev CLI):
 #   DEV_SLOT              Slot number
@@ -851,7 +877,7 @@ HOOK_FOOTER
 
     info "Generating env template..."
     cat > "$template" << 'TMPL_HEADER'
-# Auto-generated by dev init
+# Auto-generated by dev setup
 # Placeholders: {{FRONTEND_PORT}}, {{BACKEND_PORT}}, {{SUPA_API_PORT}},
 #               {{SUPA_DB_PORT}}, {{SUPA_STUDIO_PORT}}, {{SLOT}}
 TMPL_HEADER
@@ -948,42 +974,6 @@ PCONF
   echo "  Spin up an agent:"
   echo "    dev new $project feat/my-feature --agent claude"
   echo ""
-}
-
-cmd_setup() {
-  local project="${2:-}" url="${3:-}"
-  [ -z "$project" ] && die "Usage: dev setup <project> <git-url>"
-  [ -z "$url" ] && die "Usage: dev setup <project> <git-url>"
-
-  local bare_dir="$PROJECTS_DIR/$project"
-  local wt_dir="$PROJECTS_DIR/${project}-worktrees"
-
-  if [ -d "$bare_dir" ]; then
-    die "Project '$project' already exists at $bare_dir"
-  fi
-
-  info "Cloning $url as bare repo..."
-  git clone --bare "$url" "$bare_dir"
-
-  # Fix fetch refspec for bare repos
-  cd "$bare_dir"
-  git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
-  git fetch origin
-
-  mkdir -p "$wt_dir"
-
-  # Create env template directory
-  mkdir -p "$CONFIG_DIR/templates"
-
-  log "Project '$project' set up!"
-  echo ""
-  echo "  Bare repo: $bare_dir"
-  echo "  Worktrees: $wt_dir"
-  echo ""
-  echo "  (Optional) Create a custom env template:"
-  echo "  nano $CONFIG_DIR/templates/${project}.env"
-  echo ""
-  echo "  Now run: dev new $project <branch-name>"
 }
 
 cmd_new() {
@@ -3089,7 +3079,7 @@ cmd_img() {
 cmd_projects() {
   local projects_dir="$CONFIG_DIR/projects"
   if [ ! -d "$projects_dir" ] || [ -z "$(ls -A "$projects_dir" 2>/dev/null)" ]; then
-    echo -e "${DIM}No projects configured. Run 'dev init' to set up a project.${NC}"
+    echo -e "${DIM}No projects configured. Run 'dev setup' to set up a project.${NC}"
     return 0
   fi
 
@@ -4206,7 +4196,7 @@ cmd_task() {
 
       # Validate project exists
       [ -d "$CONFIG_DIR/projects" ] && [ -f "$CONFIG_DIR/projects/${project}.json" ] \
-        || die "Project '$project' not found. Run 'dev init' first."
+        || die "Project '$project' not found. Run 'dev setup' first."
 
       local id now tmp
       id=$(jq -r '.next_id' "$TASK_REGISTRY")
@@ -4949,8 +4939,7 @@ cmd_help() {
   dev — Multi-Agent Worktree Manager
 
   SETUP
-    dev init                                Interactive project setup (recommended)
-    dev setup <project> <github-ssh-url>    Quick setup (bare clone only)
+    dev setup [project] [git-url]           Set up a new project (quick or detailed)
     dev projects                            List all configured projects
     dev update [branch]                     Download latest from GitHub and reinstall
     dev help                                Show this help
@@ -5104,9 +5093,9 @@ cmd_help() {
       DEV_SUPA_API_PORT, DEV_SUPA_DB_PORT, DEV_SUPA_STUDIO_PORT
 
   EXAMPLES
-    dev init                                 # interactive setup for new project
-    dev setup klyra git@github.com:org/klyra.git   # SSH
-    dev setup klyra https://github.com/org/klyra.git  # HTTPS
+    dev setup                                # interactive setup for new project
+    dev setup klyra git@github.com:org/klyra.git   # quick setup with args
+    dev setup klyra https://github.com/org/klyra.git  # HTTPS URL also works
     dev new klyra feat/trading-ui --agent claude
     dev new klyra feat/trading-ui --yolo
     dev new klyra fix/auth-bug --agents claude,codex
@@ -5146,7 +5135,6 @@ HELPEOF
 ensure_dirs
 
 case "${1:-help}" in
-  init)      cmd_init "$@" ;;
   setup)     cmd_setup "$@" ;;
   new)       cmd_new "$@" ;;
   ls|list)   cmd_ls "$@" ;;
