@@ -212,8 +212,22 @@ TASKEOF
 
   log "Wrote TASK.md to $worktree"
 
-  # Send Claude the prompt
-  sleep 3  # Give Claude a moment to start up
+  # Wait for Claude to be ready before sending the prompt
+  local max_wait=30 waited=0
+  while [ "$waited" -lt "$max_wait" ]; do
+    local pane_content
+    pane_content=$(tmux capture-pane -t "$session_name:agent" -p 2>/dev/null || true)
+    if echo "$pane_content" | grep -qE '(^>|tips:|What can I do|How can I help)'; then
+      break
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+
+  if [ "$waited" -ge "$max_wait" ]; then
+    log "WARNING: Claude may not be ready after ${max_wait}s in $session_name, sending prompt anyway"
+  fi
+
   local prompt="Read the TASK.md file in this project root. It contains your task. Follow the instructions carefully. When you are completely done, run: touch .task-done"
   dev send "$session_name" "$prompt" 2>&1 | head -5 >> "$LOG_FILE" || true
 
