@@ -200,6 +200,22 @@ get_config_value() {
   fi
 }
 
+# Suppress the bypass-permissions confirmation dialog (Claude Code >=2.1.42 regression)
+ensure_claude_skip_prompt() {
+  local settings_file="$HOME/.claude/settings.json"
+  mkdir -p "$HOME/.claude"
+  if [ -f "$settings_file" ]; then
+    local current
+    current=$(jq -r '.skipDangerousModePermissionPrompt // false' "$settings_file" 2>/dev/null)
+    if [ "$current" != "true" ]; then
+      local tmp="$settings_file.tmp.$$"
+      jq '.skipDangerousModePermissionPrompt = true' "$settings_file" > "$tmp" && mv "$tmp" "$settings_file"
+    fi
+  else
+    echo '{"skipDangerousModePermissionPrompt": true}' > "$settings_file"
+  fi
+}
+
 # Return tmux windows JSON array: project config > global config > defaults
 get_tmux_windows() {
   local project="${1:-}"
@@ -1179,7 +1195,10 @@ cmd_new() {
   info "Starting tmux session '$name' with $agent..."
 
   local claude_flags=""
-  [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
+  if [ "$yolo" = true ]; then
+    claude_flags=" --dangerously-skip-permissions"
+    ensure_claude_skip_prompt
+  fi
 
   local agent_cmd
   case "$primary_agent" in
@@ -2920,7 +2939,10 @@ cmd_restart() {
   fi
 
   local claude_flags=""
-  [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
+  if [ "$yolo" = true ]; then
+    claude_flags=" --dangerously-skip-permissions"
+    ensure_claude_skip_prompt
+  fi
 
   # Recreate tmux session with primary agent
   local agent_cmd
@@ -3476,7 +3498,10 @@ cmd_agent() {
         config_yolo=$(jq -r '.skip_permissions // false' "$CONFIG_DIR/projects/${project}.json")
         [ "$config_yolo" = "true" ] && yolo=true
       fi
-      [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
+      if [ "$yolo" = true ]; then
+        claude_flags=" --dangerously-skip-permissions"
+        ensure_claude_skip_prompt
+      fi
 
       # Build agent command
       local agent_cmd
@@ -4515,7 +4540,10 @@ cmd_ask() {
 
   # Build agent command
   local claude_flags=""
-  [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
+  if [ "$yolo" = true ]; then
+    claude_flags=" --dangerously-skip-permissions"
+    ensure_claude_skip_prompt
+  fi
 
   local agent_cmd
   case "$agent" in
@@ -4647,7 +4675,10 @@ cmd_ghost() {
 
   # Build agent command
   local claude_flags=""
-  [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
+  if [ "$yolo" = true ]; then
+    claude_flags=" --dangerously-skip-permissions"
+    ensure_claude_skip_prompt
+  fi
 
   local agent_cmd
   case "$agent" in
@@ -4798,7 +4829,10 @@ cmd_review() {
 
   # Build agent command
   local claude_flags=""
-  [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
+  if [ "$yolo" = true ]; then
+    claude_flags=" --dangerously-skip-permissions"
+    ensure_claude_skip_prompt
+  fi
 
   # Load review prompt
   local prompt_file=""
