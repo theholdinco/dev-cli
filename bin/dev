@@ -627,8 +627,8 @@ ensure_devcontainer_json() {
     fi
   fi
 
-  # Detect Node version from project's .nvmrc or .node-version, fall back to lts
-  local node_version="lts"
+  # Detect Node version from project's .nvmrc or .node-version, fall back to 22
+  local node_version="22"
   for nv_file in "$worktree_path/.nvmrc" "$worktree_path/.node-version"; do
     if [ -f "$nv_file" ]; then
       local nv
