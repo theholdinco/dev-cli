@@ -541,55 +541,70 @@ ensure_devcontainer_json() {
 
   mkdir -p "$dc_dir"
 
-  # Build containerEnv block — always include DEV_* vars
-  local env_block='"DEV_PROJECT": "'"$DEV_PROJECT"'", "DEV_BRANCH": "'"$DEV_BRANCH"'"'
-  [ -n "${DEV_FRONTEND_PORT:-}" ] && env_block="$env_block, \"DEV_FRONTEND_PORT\": \"$DEV_FRONTEND_PORT\""
-  [ -n "${DEV_BACKEND_PORT:-}" ] && env_block="$env_block, \"DEV_BACKEND_PORT\": \"$DEV_BACKEND_PORT\""
+  # Build containerEnv as a jq object (safe from JSON injection)
+  local container_env_json
+  container_env_json=$(jq -n \
+    --arg proj "${DEV_PROJECT:-$project}" \
+    --arg branch "${DEV_BRANCH:-}" \
+    --arg fport "${DEV_FRONTEND_PORT:-}" \
+    --arg bport "${DEV_BACKEND_PORT:-}" \
+    '{DEV_PROJECT: $proj, DEV_BRANCH: $branch}
+     + (if $fport != "" then {DEV_FRONTEND_PORT: $fport} else {} end)
+     + (if $bport != "" then {DEV_BACKEND_PORT: $bport} else {} end)')
 
-  # If --env requested, pass secrets via localEnv references
-  local remote_env_block=""
+  # If --env requested, build remoteEnv with localEnv references for secrets
+  local remote_env_json="{}"
   if [ "$pass_env" = true ] && [ -f "$SECRETS_FILE" ]; then
-    # Read each VAR=value line from secrets.env and create localEnv references
-    local env_entries=""
-    while IFS='=' read -r key _; do
-      [[ "$key" =~ ^#.*$ ]] && continue
-      [[ -z "$key" ]] && continue
-      key=$(echo "$key" | xargs)
-      [ -n "$env_entries" ] && env_entries="$env_entries,"
-      env_entries="$env_entries
-      \"$key\": \"\${localEnv:$key}\""
+    local env_args=()
+    while IFS= read -r line || [ -n "$line" ]; do
+      [[ "$line" =~ ^[[:space:]]*# ]] && continue
+      [[ -z "${line// /}" ]] && continue
+      local key="${line%%=*}"
+      key="${key#"${key%%[![:space:]]*}"}"
+      key="${key%"${key##*[![:space:]]}"}"
+      [ -z "$key" ] && continue
+      env_args+=("--arg" "$key" "\${localEnv:$key}")
     done < "$SECRETS_FILE"
-    if [ -n "$env_entries" ]; then
-      remote_env_block=",
-    \"remoteEnv\": {${env_entries}
-    }"
+    if [ ${#env_args[@]} -gt 0 ]; then
+      remote_env_json=$(jq -n "${env_args[@]}" '$ARGS.named')
     fi
   fi
 
-  cat > "$dc_file" << DCEOF
-{
-  "name": "${project}-session",
-  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
-  "features": {
-    "ghcr.io/devcontainers/features/node:1": { "version": "20" },
-    "ghcr.io/devcontainers/features/git:1": {}
-  },
-  "containerEnv": { ${env_block} },
-  "mounts": [
-    "source=\${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind,readonly",
-    "source=\${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,readonly"
-  ],
-  "remoteUser": "vscode",
-  "init": true,
-  "shutdownAction": "none",
-  "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.ssh 2>/dev/null || true"${remote_env_block}
-}
-DCEOF
+  # Generate devcontainer.json using jq for safe JSON construction
+  jq -n \
+    --arg name "${project}-session" \
+    --argjson containerEnv "$container_env_json" \
+    --argjson remoteEnv "$remote_env_json" \
+    --arg pass_env "$pass_env" \
+    '{
+      name: $name,
+      image: "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+      features: {
+        "ghcr.io/devcontainers/features/node:1": { version: "20" },
+        "ghcr.io/devcontainers/features/git:1": {}
+      },
+      containerEnv: $containerEnv,
+      mounts: [
+        "source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind,readonly",
+        "source=${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,readonly"
+      ],
+      remoteUser: "vscode",
+      init: true,
+      shutdownAction: "none",
+      postCreateCommand: "sudo chown -R vscode:vscode /home/vscode/.ssh 2>/dev/null || true"
+    }
+    + (if $pass_env == "true" and ($remoteEnv | length > 0) then {remoteEnv: $remoteEnv} else {} end)' \
+    > "$dc_file"
 
-  # Don't commit generated devcontainer config
-  if [ -f "$worktree_path/.gitignore" ]; then
-    if ! grep -q "^\.devcontainer/$" "$worktree_path/.gitignore" 2>/dev/null; then
-      echo ".devcontainer/" >> "$worktree_path/.gitignore"
+  # Don't commit generated devcontainer config — use local exclude to avoid polluting the repo's .gitignore
+  # Use git rev-parse to find the actual .git dir (handles worktrees where .git is a file)
+  local git_dir
+  git_dir=$(git -C "$worktree_path" rev-parse --git-dir 2>/dev/null)
+  if [ -n "$git_dir" ]; then
+    local exclude_file="$git_dir/info/exclude"
+    mkdir -p "$(dirname "$exclude_file")"
+    if ! grep -q "^\.devcontainer/$" "$exclude_file" 2>/dev/null; then
+      echo ".devcontainer/" >> "$exclude_file"
     fi
   fi
 
@@ -602,28 +617,33 @@ start_devcontainer() {
 
   info "Building and starting devcontainer..."
 
-  # Build devcontainer up command with remote env vars
-  local dc_cmd="devcontainer up --workspace-folder \"$worktree_path\""
-  dc_cmd="$dc_cmd --id-label \"dev-cli.session=${session_name}\""
+  # Build devcontainer up command as an array (avoids eval + injection risks)
+  local dc_args=("devcontainer" "up" "--workspace-folder" "$worktree_path"
+                 "--id-label" "dev-cli.session=${session_name}")
 
   # If --env, source secrets and pass them via --remote-env
   if [ "$pass_env" = true ] && [ -f "$SECRETS_FILE" ]; then
-    while IFS='=' read -r key value; do
-      [[ "$key" =~ ^#.*$ ]] && continue
-      [[ -z "$key" ]] && continue
-      key=$(echo "$key" | xargs)
-      value=$(echo "$value" | xargs)
-      # Remove surrounding quotes if present
-      value="${value#\"}"
-      value="${value%\"}"
-      value="${value#\'}"
-      value="${value%\'}"
-      dc_cmd="$dc_cmd --remote-env \"${key}=${value}\""
+    while IFS= read -r line || [ -n "$line" ]; do
+      # Skip comments and blank lines
+      [[ "$line" =~ ^[[:space:]]*# ]] && continue
+      [[ -z "${line// /}" ]] && continue
+      # Split on first = only
+      local key="${line%%=*}"
+      local value="${line#*=}"
+      key="${key#"${key%%[![:space:]]*}"}"  # trim leading whitespace
+      key="${key%"${key##*[![:space:]]}"}"  # trim trailing whitespace
+      [ -z "$key" ] && continue
+      # Strip surrounding quotes from value
+      value="${value#"${value%%[![:space:]]*}"}"  # trim leading whitespace
+      value="${value%"${value##*[![:space:]]}"}"  # trim trailing whitespace
+      value="${value#\"}" ; value="${value%\"}"
+      value="${value#\'}" ; value="${value%\'}"
+      dc_args+=("--remote-env" "${key}=${value}")
     done < "$SECRETS_FILE"
   fi
 
   local result
-  result=$(eval "$dc_cmd" 2>&1) || {
+  result=$("${dc_args[@]}" 2>&1) || {
     die "devcontainer up failed: $result"
   }
 
@@ -642,9 +662,12 @@ start_devcontainer() {
 # Build a command prefix for executing inside a devcontainer.
 # Usage: prefix=$(build_container_exec_cmd "$container_id")
 #        tmux new-session -d -s name "$prefix bash"
+# Note: we use -i (interactive) but not -t (allocate TTY) because
+# tmux itself provides the PTY. Using -t causes "not a TTY" errors
+# in detached tmux windows.
 build_container_exec_cmd() {
   local container_id="$1"
-  echo "docker exec -it $container_id"
+  echo "docker exec -i \"$container_id\""
 }
 
 # Stop and remove a session's devcontainer.
@@ -670,8 +693,22 @@ stop_devcontainer() {
 }
 
 # Get the remote workspace folder path inside the container.
+# Checks for custom workspaceFolder in project's devcontainer.json, falls back to convention.
 get_container_workspace() {
   local worktree_path="$1"
+
+  # Check if project's devcontainer.json specifies a custom workspaceFolder
+  local dc_file="$worktree_path/.devcontainer/devcontainer.json"
+  if [ -f "$dc_file" ]; then
+    local custom_folder
+    custom_folder=$(jq -r '.workspaceFolder // empty' "$dc_file" 2>/dev/null)
+    if [ -n "$custom_folder" ]; then
+      echo "$custom_folder"
+      return 0
+    fi
+  fi
+
+  # Default devcontainer CLI convention
   local dir_name
   dir_name=$(basename "$worktree_path")
   echo "/workspaces/$dir_name"
@@ -1364,8 +1401,19 @@ cmd_new() {
     # Generate devcontainer.json if the project doesn't have one
     ensure_devcontainer_json "$worktree_path" "$project" "$container_env"
 
+    # Set up cleanup trap: if devcontainer start fails, remove orphaned worktree
+    cleanup_failed_container() {
+      warn "Devcontainer failed, cleaning up worktree..."
+      cd "$bare_dir" 2>/dev/null || true
+      git worktree remove "$worktree_path" --force 2>/dev/null || rm -rf "$worktree_path" 2>/dev/null || true
+    }
+    trap cleanup_failed_container EXIT
+
     # Start the devcontainer
     container_id=$(start_devcontainer "$worktree_path" "$name" "$container_env")
+
+    # Devcontainer started successfully — remove the cleanup trap
+    trap - EXIT
     container_exec_prefix=$(build_container_exec_cmd "$container_id")
     container_workspace=$(get_container_workspace "$worktree_path")
   fi
@@ -1381,8 +1429,8 @@ cmd_new() {
       tmp=$(mktemp)
       jq --arg name "$name" \
          --arg cid "$container_id" \
-         --argjson cenv "$container_env" \
-         '.[$name].container_id = $cid | .[$name].use_container = true | .[$name].container_env = $cenv' \
+         --arg cenv "$container_env" \
+         '.[$name].container_id = $cid | .[$name].use_container = true | .[$name].container_env = ($cenv == "true")' \
          "$PORT_REGISTRY" > "$tmp"
       mv -f "$tmp" "$PORT_REGISTRY"
       fix_registry_perms
@@ -1925,15 +1973,15 @@ cmd_kill() {
 
   info "Tearing down session '$name'..."
 
-  # Kill tmux session
-  tmux kill-session -t "$name" 2>/dev/null && log "Killed tmux session" || warn "tmux session already gone"
-
-  # Stop devcontainer if present
+  # Stop devcontainer first (allows graceful agent shutdown before tmux dies)
   local container_id
   container_id=$(get_session_field "$name" "container_id")
   if [ -n "$container_id" ]; then
     stop_devcontainer "$name" "$container_id"
   fi
+
+  # Kill tmux session
+  tmux kill-session -t "$name" 2>/dev/null && log "Killed tmux session" || warn "tmux session already gone"
 
   # Ghost sessions have no repo — just clean up the directory and unregister
   if [ "$session_type" = "ghost" ]; then
@@ -2502,7 +2550,18 @@ cmd_shell() {
   match=$(jq -r "keys[] | select(contains(\"$name\"))" "$PORT_REGISTRY" | head -1)
   [ -z "$match" ] && die "No session matching '$name'"
 
-  # Attach to the shell window
+  # If session uses a devcontainer, exec into the container directly
+  local shell_cid
+  shell_cid=$(get_session_field "$match" "container_id")
+  if [ -n "$shell_cid" ]; then
+    local shell_workspace
+    shell_workspace=$(get_container_workspace "$(get_session_field "$match" "path")")
+    info "Opening shell inside container ${shell_cid:0:12}..."
+    docker exec -it "$shell_cid" bash -lc "cd $shell_workspace && exec bash"
+    return $?
+  fi
+
+  # Normal mode: attach to the shell window
   tmux attach-session -t "$match:2"
 }
 
@@ -2903,6 +2962,13 @@ cmd_gc() {
     project=$(get_session_field "$name" "project")
     local bare_dir="$PROJECTS_DIR/$project"
 
+    # Stop devcontainer if present
+    local gc_container_id
+    gc_container_id=$(get_session_field "$name" "container_id")
+    if [ -n "$gc_container_id" ]; then
+      stop_devcontainer "$name" "$gc_container_id"
+    fi
+
     # Remove worktree
     if [ -d "$worktree_path" ] && [ -d "$bare_dir" ]; then
       cd "$bare_dir"
@@ -3202,6 +3268,8 @@ cmd_restart() {
     # Ensure container is running, restart it if needed
     if ! docker inspect "$container_id" --format '{{.State.Status}}' 2>/dev/null | grep -q "running"; then
       info "Restarting devcontainer..."
+      # Clean up the old stopped container first to avoid accumulating stale containers
+      stop_devcontainer "$match" "$container_id"
       local container_env_flag
       container_env_flag=$(get_session_field "$match" "container_env")
       container_id=$(start_devcontainer "$worktree_path" "$match" "${container_env_flag:-false}")
@@ -3824,6 +3892,10 @@ cmd_agent() {
       local cid
       cid=$(get_session_field "$match" "container_id")
       if [ -n "$cid" ]; then
+        # Verify container is running before trying to exec into it
+        if ! docker inspect "$cid" --format '{{.State.Status}}' 2>/dev/null | grep -q "running"; then
+          die "Container ${cid:0:12} is not running. Use 'dev restart $match' to restart the session."
+        fi
         local cprefix cworkspace
         cprefix=$(build_container_exec_cmd "$cid")
         cworkspace=$(get_container_workspace "$worktree_path")
