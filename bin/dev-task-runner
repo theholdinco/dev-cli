@@ -4,8 +4,8 @@
 #
 # Processes pending tasks from tasks.json:
 #   1. Creates worktree + session via `dev new`
-#   2. Writes TASK.md with instructions
-#   3. Sends Claude a prompt via `dev send`
+#   2. Passes task prompt directly to Claude via --prompt flag
+#   3. Writes TASK.md with instructions for reference
 #   4. Monitors for .task-done marker
 #   5. On completion: pushes branch, creates PR, marks done
 #
@@ -139,11 +139,18 @@ process_pending() {
     '(.tasks[] | select(.id == $id)) |= (.status = "running" | .started = $now)' \
     "$TASK_REGISTRY" > "$tmp" && mv "$tmp" "$TASK_REGISTRY"
 
-  # Create session via dev new
+  # Build the prompt that will be passed directly to Claude as a CLI argument.
+  # This avoids the unreliable tmux send-keys approach which races against
+  # Claude's terminal UI initialization.
+  local prompt="Read the TASK.md file in this project root. It contains your task. Follow the instructions carefully. When you are completely done, run: touch .task-done"
+
+  # Create session via dev new with --prompt to pass the task directly to Claude.
+  # Claude receives the prompt as a CLI argument and begins working immediately
+  # once it finishes initializing — no tmux send-keys needed.
   local dev_output session_name
   local from_flag=""
   [ -n "$from_branch" ] && from_flag="--from $from_branch"
-  dev_output=$(dev new "$project" "$branch" $from_flag --agent claude --yolo 2>&1) || true
+  dev_output=$(dev new "$project" "$branch" $from_flag --agent claude --yolo --prompt "$prompt" 2>&1) || true
   # Strip ANSI codes before parsing
   session_name=$(echo "$dev_output" | sed 's/\x1b\[[0-9;]*m//g' | grep -oP 'Session:\s+\K\S+' | head -1)
 
@@ -178,7 +185,10 @@ process_pending() {
     return 1
   fi
 
-  # Write TASK.md
+  # Write TASK.md to the worktree as a reference for the agent.
+  # The worktree already exists (dev new creates it synchronously before launching tmux),
+  # and Claude is still initializing in the background, so TASK.md will be ready
+  # by the time Claude processes the prompt.
   cat > "$worktree/TASK.md" << TASKEOF
 # Task: $description
 
@@ -211,27 +221,6 @@ This signals the task runner that you've completed the work.
 TASKEOF
 
   log "Wrote TASK.md to $worktree"
-
-  # Wait for Claude to be ready before sending the prompt
-  local max_wait=30 waited=0
-  while [ "$waited" -lt "$max_wait" ]; do
-    local pane_content
-    pane_content=$(tmux capture-pane -t "$session_name:agent" -p 2>/dev/null || true)
-    if echo "$pane_content" | grep -qE '(^>|tips:|What can I do|How can I help)'; then
-      break
-    fi
-    sleep 2
-    waited=$((waited + 2))
-  done
-
-  if [ "$waited" -ge "$max_wait" ]; then
-    log "WARNING: Claude may not be ready after ${max_wait}s in $session_name, sending prompt anyway"
-  fi
-
-  local prompt="Read the TASK.md file in this project root. It contains your task. Follow the instructions carefully. When you are completely done, run: touch .task-done"
-  dev send "$session_name" "$prompt" 2>&1 | head -5 >> "$LOG_FILE" || true
-
-  log "Sent prompt to $session_name for task $id"
 
   # Notify via Telegram that task has started
   local hostname

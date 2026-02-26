@@ -993,7 +993,7 @@ PCONF
 }
 
 cmd_new() {
-  local project="${2:-}" branch="${3:-}" agent="" agents_flag="" run_cmd="" yolo=false attach=false from_branch="" private=false
+  local project="${2:-}" branch="${3:-}" agent="" agents_flag="" run_cmd="" yolo=false attach=false from_branch="" private=false initial_prompt=""
   shift 2 || true
 
   # Parse options
@@ -1007,6 +1007,8 @@ cmd_new() {
       --run=*) run_cmd="${1#*=}"; shift ;;
       --from) from_branch="${2:-}"; shift 2 ;;
       --from=*) from_branch="${1#*=}"; shift ;;
+      --prompt) initial_prompt="${2:-}"; shift 2 ;;
+      --prompt=*) initial_prompt="${1#*=}"; shift ;;
       --yolo) yolo=true; shift ;;
       --attach) attach=true; shift ;;
       --private) private=true; shift ;;
@@ -1038,8 +1040,8 @@ cmd_new() {
     [ "$config_yolo" = "true" ] && yolo=true
   fi
 
-  [ -z "$project" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--private]"
-  [ -z "$branch" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--private]"
+  [ -z "$project" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--private] [--prompt \"...\"]"
+  [ -z "$branch" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--private] [--prompt \"...\"]"
 
   local bare_dir="$PROJECTS_DIR/$project"
   local wt_dir="$PROJECTS_DIR/${project}-worktrees"
@@ -1201,12 +1203,22 @@ cmd_new() {
   fi
 
   local agent_cmd
+  local prompt_arg=""
+  if [ -n "$initial_prompt" ]; then
+    # Escape shell metacharacters for safe embedding in the sh -c command
+    local escaped_prompt="${initial_prompt//\\/\\\\}"
+    escaped_prompt="${escaped_prompt//\$/\\\$}"
+    escaped_prompt="${escaped_prompt//\`/\\\`}"
+    escaped_prompt="${escaped_prompt//\"/\\\"}"
+    prompt_arg=" \"${escaped_prompt}\""
+  fi
+
   case "$primary_agent" in
     claude)
-      agent_cmd="cd $worktree_path && claude${claude_flags}"
+      agent_cmd="cd $worktree_path && claude${claude_flags}${prompt_arg}"
       ;;
     codex)
-      agent_cmd="cd $worktree_path && codex"
+      agent_cmd="cd $worktree_path && codex${prompt_arg}"
       ;;
     none)
       agent_cmd="cd $worktree_path && echo 'Ready. No agent started.' && bash"
@@ -2039,6 +2051,14 @@ cmd_pr_start() {
   info "PR #${pr_number}: $pr_title"
   info "Branch: $branch (state: $pr_state)"
 
+  # Build the context prompt to pass directly to Claude via --prompt
+  local context_prompt
+  if [ -n "$prompt" ]; then
+    context_prompt="You are continuing work on an existing PR. Read .pr-context.md for the PR details (PR #${pr_number}: ${pr_title}). ${prompt}"
+  else
+    context_prompt="You are continuing work on an existing PR. Read .pr-context.md for the full PR description and context. The PR is #${pr_number}: ${pr_title} (${pr_url}). Review the existing changes and continue working on this PR."
+  fi
+
   # Build args for cmd_new
   local new_args=("new" "$project" "$branch")
   if [ -n "$agents_flag" ]; then
@@ -2047,17 +2067,18 @@ cmd_pr_start() {
     new_args+=("--agent" "$agent")
   fi
   [ "$yolo" = true ] && new_args+=("--yolo")
-  [ "$attach" = false ] && true  # don't pass --attach yet, we send prompt first
   [ "$private" = true ] && new_args+=("--private")
+  new_args+=("--prompt" "$context_prompt")
 
-  # Create the session via cmd_new
+  # Create the session via cmd_new (prompt is passed directly to Claude as CLI arg)
   cmd_new "${new_args[@]}"
 
-  # Build the session name so we can send context to it
+  # Build the session name so we can write PR context file
   local name
   name=$(session_name "$project" "$branch")
 
-  # Write PR context file into the worktree for the agent to reference
+  # Write PR context file into the worktree for the agent to reference.
+  # The worktree already exists (cmd_new creates it synchronously before launching tmux).
   local worktree_path
   worktree_path=$(get_session_field "$name" "path")
 
@@ -2073,20 +2094,7 @@ cmd_pr_start() {
 
 ${pr_body}
 PREOF
-
-    # Send the PR context to the agent
-    local context_prompt
-    if [ -n "$prompt" ]; then
-      context_prompt="You are continuing work on an existing PR. Read .pr-context.md for the PR details (PR #${pr_number}: ${pr_title}). ${prompt}"
-    else
-      context_prompt="You are continuing work on an existing PR. Read .pr-context.md for the full PR description and context. The PR is #${pr_number}: ${pr_title} (${pr_url}). Review the existing changes and continue working on this PR."
-    fi
-
-    # Small delay to let the agent start up
-    sleep 1
-    tmux send-keys -t "$name:agent" -l "$context_prompt"
-    tmux send-keys -t "$name:agent" Enter
-    log "PR context sent to agent"
+    log "PR context written to $worktree_path/.pr-context.md"
   fi
 
   # Update the registry with PR metadata
