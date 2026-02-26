@@ -714,12 +714,12 @@ start_devcontainer() {
 # Build a command prefix for executing inside a devcontainer.
 # Usage: prefix=$(build_container_exec_cmd "$container_id")
 #        tmux new-session -d -s name "$prefix bash"
-# Note: we use -i (interactive) but not -t (allocate TTY) because
-# tmux itself provides the PTY. Using -t causes "not a TTY" errors
-# in detached tmux windows.
+# Note: -it is safe here because tmux always allocates a PTY for each
+# window (even detached sessions). The -t flag is needed so programs
+# like Claude Code that check isatty() can render their TUI.
 build_container_exec_cmd() {
   local container_id="$1"
-  echo "docker exec -i \"$container_id\""
+  echo "docker exec -it \"$container_id\""
 }
 
 # Stop and remove a session's devcontainer.
