@@ -622,12 +622,23 @@ ensure_devcontainer_json() {
     fi
   fi
 
+  # Build the postCreateCommand: install Claude Code + pre-approve workspace trust
+  local container_workspace
+  container_workspace="/workspaces/$(basename "$worktree_path")"
+  local post_create_cmd="sudo chown -R vscode:vscode /home/vscode/.ssh 2>/dev/null || true"
+  post_create_cmd="$post_create_cmd && npm install -g @anthropic-ai/claude-code"
+  # Pre-approve workspace trust so Claude doesn't prompt on first launch
+  post_create_cmd="$post_create_cmd && mkdir -p ~/.claude"
+  post_create_cmd="$post_create_cmd && echo '{\"skipDangerousModePermissionPrompt\": true}' > ~/.claude/settings.json"
+  post_create_cmd="$post_create_cmd && echo '{\"projects\": {\"$container_workspace\": {\"hasTrustDialogAccepted\": true}}}' > ~/.claude.json"
+
   # Generate devcontainer.json using jq for safe JSON construction
   jq -n \
     --arg name "${project}-session" \
     --argjson containerEnv "$container_env_json" \
     --argjson remoteEnv "$remote_env_json" \
     --arg pass_env "$pass_env" \
+    --arg postCreate "$post_create_cmd" \
     '{
       name: $name,
       image: "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
@@ -643,7 +654,7 @@ ensure_devcontainer_json() {
       remoteUser: "vscode",
       init: true,
       shutdownAction: "none",
-      postCreateCommand: "sudo chown -R vscode:vscode /home/vscode/.ssh 2>/dev/null || true && npm install -g @anthropic-ai/claude-code"
+      postCreateCommand: $postCreate
     }
     + (if $pass_env == "true" and ($remoteEnv | length > 0) then {remoteEnv: $remoteEnv} else {} end)' \
     > "$dc_file"
