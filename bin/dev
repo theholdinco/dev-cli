@@ -18,6 +18,13 @@ PORT_REGISTRY="$GLOBAL_PORT_REGISTRY"
 SECRETS_FILE="$CONFIG_DIR/secrets.env"
 TASK_REGISTRY="$CONFIG_DIR/tasks.json"
 LOG_DIR="$CONFIG_DIR/logs"
+
+# API key env vars that are always passed into devcontainers.
+# Add new model provider keys here as needed.
+CONTAINER_API_KEYS=(
+  ANTHROPIC_API_KEY
+  OPENAI_API_KEY
+)
 WEB_DIR="$HOME/.local/share/dev-cli/web"
 
 # Port ranges per slot
@@ -666,7 +673,25 @@ start_devcontainer() {
   local dc_args=("devcontainer" "up" "--workspace-folder" "$worktree_path"
                  "--id-label" "dev-cli.session=${session_name}")
 
-  # If --env, source secrets and pass them via --remote-env
+  # Always pass model API keys from secrets.env into the container.
+  # Without these, Claude Code / Codex can't authenticate.
+  local -A passed_keys=()
+  if [ -f "$SECRETS_FILE" ]; then
+    for api_key_name in "${CONTAINER_API_KEYS[@]}"; do
+      local api_key_value
+      api_key_value=$(grep -E "^${api_key_name}=" "$SECRETS_FILE" 2>/dev/null | head -1)
+      if [ -n "$api_key_value" ]; then
+        local val="${api_key_value#*=}"
+        # Strip surrounding quotes
+        val="${val#\"}" ; val="${val%\"}"
+        val="${val#\'}" ; val="${val%\'}"
+        dc_args+=("--remote-env" "${api_key_name}=${val}")
+        passed_keys["$api_key_name"]=1
+      fi
+    done
+  fi
+
+  # If --env, also pass all remaining secrets.env vars via --remote-env
   if [ "$pass_env" = true ] && [ -f "$SECRETS_FILE" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       # Skip comments and blank lines
@@ -678,6 +703,8 @@ start_devcontainer() {
       key="${key#"${key%%[![:space:]]*}"}"  # trim leading whitespace
       key="${key%"${key##*[![:space:]]}"}"  # trim trailing whitespace
       [ -z "$key" ] && continue
+      # Skip if already passed as an API key
+      [ -n "${passed_keys[$key]+x}" ] && continue
       # Strip surrounding quotes from value
       value="${value#"${value%%[![:space:]]*}"}"  # trim leading whitespace
       value="${value%"${value##*[![:space:]]}"}"  # trim trailing whitespace
