@@ -687,17 +687,24 @@ start_devcontainer() {
     done < "$SECRETS_FILE"
   fi
 
-  local result
-  result=$("${dc_args[@]}" 2>&1) || {
-    die "devcontainer up failed: $result"
+  # devcontainer CLI outputs build logs on stderr and JSON result on stdout.
+  # Capture them separately so jq can parse the JSON cleanly.
+  local result stderr_log
+  local stderr_file
+  stderr_file=$(mktemp)
+  result=$("${dc_args[@]}" 2>"$stderr_file") || {
+    stderr_log=$(cat "$stderr_file")
+    rm -f "$stderr_file"
+    die "devcontainer up failed: $stderr_log"
   }
+  rm -f "$stderr_file"
 
   local outcome container_id
   outcome=$(echo "$result" | jq -r '.outcome // empty' 2>/dev/null)
   container_id=$(echo "$result" | jq -r '.containerId // empty' 2>/dev/null)
 
   if [ "$outcome" != "success" ] || [ -z "$container_id" ]; then
-    die "devcontainer up did not succeed: $result"
+    die "devcontainer up did not succeed. outcome=$outcome result=$result"
   fi
 
   log "Container started: ${container_id:0:12}"
@@ -1438,13 +1445,10 @@ cmd_new() {
     # Generate devcontainer.json if the project doesn't have one
     ensure_devcontainer_json "$worktree_path" "$project" "$container_env"
 
-    # Set up cleanup trap: if devcontainer start fails, remove orphaned worktree
-    cleanup_failed_container() {
-      warn "Devcontainer failed, cleaning up worktree..."
-      cd "$bare_dir" 2>/dev/null || true
-      git worktree remove "$worktree_path" --force 2>/dev/null || rm -rf "$worktree_path" 2>/dev/null || true
-    }
-    trap cleanup_failed_container EXIT
+    # Set up cleanup trap: if devcontainer start fails, remove orphaned worktree.
+    # Use a string trap (not a function) so variable values are captured now,
+    # since locals from cmd_new go out of scope when die→exit fires the trap.
+    trap "warn 'Devcontainer failed, cleaning up worktree...' ; cd \"$bare_dir\" 2>/dev/null || true ; git worktree remove \"$worktree_path\" --force 2>/dev/null || rm -rf \"$worktree_path\" 2>/dev/null || true" EXIT
 
     # Start the devcontainer
     container_id=$(start_devcontainer "$worktree_path" "$name" "$container_env")
