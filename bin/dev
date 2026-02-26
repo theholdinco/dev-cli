@@ -654,7 +654,7 @@ ensure_devcontainer_json() {
   # Step 2: Mark onboarding complete and trust the container workspace.
   # This is the critical step — without hasCompletedOnboarding, Claude shows the welcome flow.
   # We write a fresh file with just the fields Claude needs (proven pattern from working Dockerfiles).
-  post_create_cmd="$post_create_cmd ; echo '{\"hasCompletedOnboarding\":true,\"projects\":{\"$container_workspace\":{\"hasTrustDialogAccepted\":true,\"allowedTools\":[]}}}' > ~/.claude.json"
+  post_create_cmd="$post_create_cmd ; echo '{\"hasCompletedOnboarding\":true,\"installMethod\":\"native\",\"bypassPermissionsModeAccepted\":true,\"projects\":{\"$container_workspace\":{\"hasTrustDialogAccepted\":true,\"allowedTools\":[]}}}' > ~/.claude.json"
   # Step 3: Copy SSH keys from readonly mount
   post_create_cmd="$post_create_cmd ; if [ -d /tmp/.host-ssh ]; then cp -r /tmp/.host-ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/* 2>/dev/null; fi"
   # Step 4: Install Claude Code globally
@@ -793,7 +793,9 @@ start_devcontainer() {
 # like Claude Code that check isatty() can render their TUI.
 build_container_exec_cmd() {
   local container_id="$1"
-  echo "docker exec -it \"$container_id\""
+  # --user node: must match remoteUser in devcontainer.json so we read the
+  # same home directory that postCreateCommand wrote config files to.
+  echo "docker exec -it --user node \"$container_id\""
 }
 
 # Stop and remove a session's devcontainer.
@@ -2692,7 +2694,7 @@ cmd_shell() {
     local shell_workspace
     shell_workspace=$(get_container_workspace "$(get_session_field "$match" "path")")
     info "Opening shell inside container ${shell_cid:0:12}..."
-    docker exec -it "$shell_cid" bash -lc "cd $shell_workspace && exec bash"
+    docker exec -it --user node "$shell_cid" bash -lc "cd $shell_workspace && exec bash"
     return $?
   fi
 
