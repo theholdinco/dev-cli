@@ -651,9 +651,12 @@ ensure_devcontainer_json() {
 
   # Step 1: Copy the host's ~/.claude/ directory (credentials, settings, plugins)
   local post_create_cmd="if [ -d /tmp/.host-claude ]; then mkdir -p ~/.claude && cp -a /tmp/.host-claude/. ~/.claude/ && chmod 600 ~/.claude/.credentials.json 2>/dev/null; fi"
+  # Step 1b: Ensure settings.json has thinking enabled (skips the thinking mode onboarding prompt).
+  # Uses jq if available, otherwise writes a minimal settings file.
+  post_create_cmd="$post_create_cmd ; if [ -f ~/.claude/settings.json ] && command -v jq >/dev/null; then jq '.alwaysThinkingEnabled = true | .skipDangerousModePermissionPrompt = true' ~/.claude/settings.json > ~/.claude/settings.json.tmp && mv ~/.claude/settings.json.tmp ~/.claude/settings.json; elif command -v jq >/dev/null; then jq -n '{alwaysThinkingEnabled:true,skipDangerousModePermissionPrompt:true}' > ~/.claude/settings.json; fi"
   # Step 2: Mark onboarding complete and trust the container workspace.
   # This is the critical step — without hasCompletedOnboarding, Claude shows the welcome flow.
-  # We write a fresh file with just the fields Claude needs (proven pattern from working Dockerfiles).
+  # installMethod + bypassPermissionsModeAccepted prevent additional prompts.
   post_create_cmd="$post_create_cmd ; echo '{\"hasCompletedOnboarding\":true,\"installMethod\":\"native\",\"bypassPermissionsModeAccepted\":true,\"projects\":{\"$container_workspace\":{\"hasTrustDialogAccepted\":true,\"allowedTools\":[]}}}' > ~/.claude.json"
   # Step 3: Copy SSH keys from readonly mount
   post_create_cmd="$post_create_cmd ; if [ -d /tmp/.host-ssh ]; then cp -r /tmp/.host-ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/* 2>/dev/null; fi"
