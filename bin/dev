@@ -697,7 +697,8 @@ ensure_devcontainer_json() {
 start_devcontainer() {
   local worktree_path="$1" session_name="$2" pass_env="$3"
 
-  info "Building and starting devcontainer..."
+  # Use >&2 for messages since this function's stdout is captured by $()
+  info "Building and starting devcontainer..." >&2
 
   # Build devcontainer up command as an array (avoids eval + injection risks)
   local dc_args=("devcontainer" "up" "--workspace-folder" "$worktree_path"
@@ -764,7 +765,7 @@ start_devcontainer() {
     die "devcontainer up did not succeed. outcome=$outcome result=$result"
   fi
 
-  log "Container started: ${container_id:0:12}"
+  log "Container started: ${container_id:0:12}" >&2
   echo "$container_id"
 }
 
