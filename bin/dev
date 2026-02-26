@@ -200,6 +200,51 @@ get_config_value() {
   fi
 }
 
+# Suppress the bypass-permissions confirmation dialog (Claude Code >=2.1.42 regression)
+ensure_claude_skip_prompt() {
+  local settings_file="$HOME/.claude/settings.json"
+  mkdir -p "$HOME/.claude"
+  if [ -f "$settings_file" ]; then
+    local current
+    current=$(jq -r '.skipDangerousModePermissionPrompt // false' "$settings_file" 2>/dev/null)
+    if [ "$current" != "true" ]; then
+      local tmp="$settings_file.tmp.$$"
+      jq '.skipDangerousModePermissionPrompt = true' "$settings_file" > "$tmp" && mv "$tmp" "$settings_file"
+    fi
+  else
+    echo '{"skipDangerousModePermissionPrompt": true}' > "$settings_file"
+  fi
+}
+
+# Pre-approve a directory in ~/.claude.json so Claude Code skips the
+# "Do you trust the files in this folder?" dialog on first launch.
+# Claude stores trust state in .projects.<path>.hasTrustDialogAccepted.
+# Called unconditionally (not just for --yolo) because the trust dialog
+# appears regardless of permission mode.
+ensure_claude_trust() {
+  local dir="$1"
+  local claude_json="$HOME/.claude.json"
+
+  (
+    flock -x 200
+
+    if [ ! -f "$claude_json" ]; then
+      jq -n --arg p "$dir" '{projects: {($p): {hasTrustDialogAccepted: true}}}' > "$claude_json"
+      return 0
+    fi
+
+    local already
+    already=$(jq -r --arg p "$dir" '.projects[$p].hasTrustDialogAccepted // false' "$claude_json" 2>/dev/null)
+    [ "$already" = "true" ] && return 0
+
+    local tmp="$claude_json.tmp.$$"
+    jq --arg p "$dir" \
+      '.projects[$p] = (.projects[$p] // {}) | .projects[$p].hasTrustDialogAccepted = true' \
+      "$claude_json" > "$tmp" && mv "$tmp" "$claude_json" \
+      || { rm -f "$tmp"; return 0; }
+  ) 200>"$claude_json.lock"
+}
+
 # Return tmux windows JSON array: project config > global config > defaults
 get_tmux_windows() {
   local project="${1:-}"
@@ -750,13 +795,23 @@ patch_supabase_config() {
 
 # ── Commands ────────────────────────────────────────────────────────────────
 
-cmd_init() {
+cmd_setup() {
+  local project="${2:-}" url="${3:-}"
+
   echo ""
-  echo -e "  ${BOLD}Initialize a new project${NC}"
+  echo -e "  ${BOLD}Set up a new project${NC}"
   echo ""
 
-  # Project name
-  local project=""
+  # Sanitize project name if passed as arg
+  if [ -n "$project" ]; then
+    project=$(echo "$project" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g')
+    [ -z "$project" ] && die "Invalid project name (must contain alphanumeric characters or hyphens)"
+    if [ -d "$PROJECTS_DIR/$project" ]; then
+      die "Project '$project' already exists at $PROJECTS_DIR/$project"
+    fi
+  fi
+
+  # Project name (interactive prompt if not provided)
   while [ -z "$project" ]; do
     read -rp "  Project name (short, no spaces, e.g. klyra): " project
     project=$(echo "$project" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g')
@@ -772,9 +827,13 @@ cmd_init() {
     fi
   done
 
-  # GitHub URL
-  local url=""
-  if [ ! -d "$PROJECTS_DIR/$project" ]; then
+  # Validate URL if passed as arg
+  if [ -n "$url" ] && [[ ! "$url" =~ ^git@|^https:// ]]; then
+    die "Invalid git URL: $url (must start with git@ or https://)"
+  fi
+
+  # GitHub URL (interactive prompt if not provided)
+  if [ -z "$url" ] && [ ! -d "$PROJECTS_DIR/$project" ]; then
     while [ -z "$url" ]; do
       read -rp "  GitHub URL (SSH or HTTPS, e.g. git@github.com:org/repo.git): " url
       if [ -z "$url" ]; then
@@ -786,98 +845,110 @@ cmd_init() {
     done
   fi
 
-  # Stack detection
+  # Quick vs detailed setup
   echo ""
-  echo -e "  ${BOLD}Stack configuration${NC}"
-  echo ""
+  echo -e "  ${BOLD}Setup mode${NC}"
+  echo "  1) Quick setup (use defaults, configure later)"
+  echo "  2) Detailed setup (configure stack, env vars, etc.)"
+  local setup_mode=""
+  read -rp "  Select [1]: " setup_mode
+  setup_mode=${setup_mode:-1}
 
-  local has_nextjs="y" has_backend="n" has_supabase="y"
+  local has_nextjs="no" has_backend="no" has_supabase="no"
   local pkg_manager="npm"
-
-  read -rp "  Has Next.js frontend? [Y/n]: " has_nextjs
-  has_nextjs=${has_nextjs:-y}
-
-  read -rp "  Has Express/Node backend? [y/N]: " has_backend
-  has_backend=${has_backend:-n}
-
-  read -rp "  Uses Supabase? [Y/n]: " has_supabase
-  has_supabase=${has_supabase:-y}
-
-  echo ""
-  echo -e "  ${BOLD}Package manager${NC}"
-  echo "  1) npm"
-  echo "  2) pnpm"
-  echo "  3) yarn"
-  read -rp "  Select [1]: " pm_choice
-  case "${pm_choice:-1}" in
-    2) pkg_manager="pnpm" ;;
-    3) pkg_manager="yarn" ;;
-    *) pkg_manager="npm" ;;
-  esac
-
-  # Dev server command
-  echo ""
-  echo -e "  ${BOLD}Dev server command${NC}"
-  echo -e "  ${DIM}Command to auto-run in the server window (e.g., pnpm dev, npm run dev)${NC}"
-  echo -e "  ${DIM}Leave empty to skip (you can always start it manually)${NC}"
   local run_cmd=""
-  read -rp "  Run command: " run_cmd
-
-  # Monorepo detection
   local is_monorepo="n"
   local packages=()
+  local extra_vars=()
+  declare -A pkg_vars
 
-  echo ""
-  read -rp "  Is this a monorepo with multiple packages? [y/N]: " is_monorepo
-  is_monorepo=${is_monorepo:-n}
-
-  if [[ "$is_monorepo" =~ ^[Yy] ]]; then
+  if [ "$setup_mode" = "2" ]; then
+    # Stack detection
     echo ""
-    echo -e "  ${BOLD}Package paths that need their own .env${NC}"
-    echo -e "  ${DIM}Enter relative paths from repo root (e.g., packages/web, packages/api)${NC}"
+    echo -e "  ${BOLD}Stack configuration${NC}"
+    echo ""
+
+    has_nextjs="y" has_backend="n" has_supabase="y"
+
+    read -rp "  Has Next.js frontend? [Y/n]: " has_nextjs
+    has_nextjs=${has_nextjs:-y}
+
+    read -rp "  Has Express/Node backend? [y/N]: " has_backend
+    has_backend=${has_backend:-n}
+
+    read -rp "  Uses Supabase? [Y/n]: " has_supabase
+    has_supabase=${has_supabase:-y}
+
+    echo ""
+    echo -e "  ${BOLD}Package manager${NC}"
+    echo "  1) npm"
+    echo "  2) pnpm"
+    echo "  3) yarn"
+    read -rp "  Select [1]: " pm_choice
+    case "${pm_choice:-1}" in
+      2) pkg_manager="pnpm" ;;
+      3) pkg_manager="yarn" ;;
+      *) pkg_manager="npm" ;;
+    esac
+
+    # Dev server command
+    echo ""
+    echo -e "  ${BOLD}Dev server command${NC}"
+    echo -e "  ${DIM}Command to auto-run in the server window (e.g., pnpm dev, npm run dev)${NC}"
+    echo -e "  ${DIM}Leave empty to skip (you can always start it manually)${NC}"
+    read -rp "  Run command: " run_cmd
+
+    # Monorepo detection
+    echo ""
+    read -rp "  Is this a monorepo with multiple packages? [y/N]: " is_monorepo
+    is_monorepo=${is_monorepo:-n}
+
+    if [[ "$is_monorepo" =~ ^[Yy] ]]; then
+      echo ""
+      echo -e "  ${BOLD}Package paths that need their own .env${NC}"
+      echo -e "  ${DIM}Enter relative paths from repo root (e.g., packages/web, packages/api)${NC}"
+      echo -e "  ${DIM}Press Enter on empty line when done${NC}"
+      echo ""
+      while true; do
+        read -rp "  > " pkg_path
+        [ -z "$pkg_path" ] && break
+        packages+=("$pkg_path")
+      done
+
+      if [ ${#packages[@]} -eq 0 ]; then
+        warn "No packages entered, treating as standard repo"
+        is_monorepo="n"
+      fi
+    fi
+
+    # Extra env vars
+    echo ""
+    echo -e "  ${BOLD}Extra environment variables${NC} (shared across all packages)"
+    echo -e "  ${DIM}Add any project-specific vars (one per line, KEY=VALUE format)${NC}"
     echo -e "  ${DIM}Press Enter on empty line when done${NC}"
     echo ""
+
     while true; do
-      read -rp "  > " pkg_path
-      [ -z "$pkg_path" ] && break
-      packages+=("$pkg_path")
+      read -rp "  > " var_line
+      [ -z "$var_line" ] && break
+      extra_vars+=("$var_line")
     done
 
-    if [ ${#packages[@]} -eq 0 ]; then
-      warn "No packages entered, treating as standard repo"
-      is_monorepo="n"
-    fi
-  fi
-
-  # Extra env vars
-  echo ""
-  echo -e "  ${BOLD}Extra environment variables${NC} (shared across all packages)"
-  echo -e "  ${DIM}Add any project-specific vars (one per line, KEY=VALUE format)${NC}"
-  echo -e "  ${DIM}Press Enter on empty line when done${NC}"
-  echo ""
-
-  local extra_vars=()
-  while true; do
-    read -rp "  > " var_line
-    [ -z "$var_line" ] && break
-    extra_vars+=("$var_line")
-  done
-
-  # Per-package env vars for monorepos
-  declare -A pkg_vars
-  if [[ "$is_monorepo" =~ ^[Yy] ]]; then
-    for pkg in "${packages[@]}"; do
-      echo ""
-      echo -e "  ${BOLD}Extra env vars for ${CYAN}$pkg${NC}"
-      echo -e "  ${DIM}Press Enter on empty line when done${NC}"
-      local this_pkg_vars=""
-      while true; do
-        read -rp "  $pkg> " var_line
-        [ -z "$var_line" ] && break
-        this_pkg_vars+="$var_line"$'\n'
+    # Per-package env vars for monorepos
+    if [[ "$is_monorepo" =~ ^[Yy] ]]; then
+      for pkg in "${packages[@]}"; do
+        echo ""
+        echo -e "  ${BOLD}Extra env vars for ${CYAN}$pkg${NC}"
+        echo -e "  ${DIM}Press Enter on empty line when done${NC}"
+        local this_pkg_vars=""
+        while true; do
+          read -rp "  $pkg> " var_line
+          [ -z "$var_line" ] && break
+          this_pkg_vars+="$var_line"$'\n'
+        done
+        pkg_vars["$pkg"]="$this_pkg_vars"
       done
-      pkg_vars["$pkg"]="$this_pkg_vars"
-    done
+    fi
   fi
 
   # ── Execute setup ─────────────────────────────────────────
@@ -885,7 +956,7 @@ cmd_init() {
   echo ""
   info "Setting up project '$project'..."
 
-  # Clone repo (reuse cmd_setup logic)
+  # Clone repo
   if [ -n "$url" ] && [ ! -d "$PROJECTS_DIR/$project" ]; then
     local bare_dir="$PROJECTS_DIR/$project"
     local wt_dir="$PROJECTS_DIR/${project}-worktrees"
@@ -916,7 +987,7 @@ cmd_init() {
 #!/usr/bin/env bash
 ###############################################################################
 # Project setup hook (monorepo)
-# Auto-generated by dev init. Runs after worktree creation.
+# Auto-generated by dev setup. Runs after worktree creation.
 #
 # Available env vars (set by dev CLI):
 #   DEV_SLOT              Slot number
@@ -1041,7 +1112,7 @@ HOOK_FOOTER
 
     info "Generating env template..."
     cat > "$template" << 'TMPL_HEADER'
-# Auto-generated by dev init
+# Auto-generated by dev setup
 # Placeholders: {{FRONTEND_PORT}}, {{BACKEND_PORT}}, {{SUPA_API_PORT}},
 #               {{SUPA_DB_PORT}}, {{SUPA_STUDIO_PORT}}, {{SLOT}}
 TMPL_HEADER
@@ -1140,44 +1211,8 @@ PCONF
   echo ""
 }
 
-cmd_setup() {
-  local project="${2:-}" url="${3:-}"
-  [ -z "$project" ] && die "Usage: dev setup <project> <git-url>"
-  [ -z "$url" ] && die "Usage: dev setup <project> <git-url>"
-
-  local bare_dir="$PROJECTS_DIR/$project"
-  local wt_dir="$PROJECTS_DIR/${project}-worktrees"
-
-  if [ -d "$bare_dir" ]; then
-    die "Project '$project' already exists at $bare_dir"
-  fi
-
-  info "Cloning $url as bare repo..."
-  git clone --bare "$url" "$bare_dir"
-
-  # Fix fetch refspec for bare repos
-  cd "$bare_dir"
-  git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
-  git fetch origin
-
-  mkdir -p "$wt_dir"
-
-  # Create env template directory
-  mkdir -p "$CONFIG_DIR/templates"
-
-  log "Project '$project' set up!"
-  echo ""
-  echo "  Bare repo: $bare_dir"
-  echo "  Worktrees: $wt_dir"
-  echo ""
-  echo "  (Optional) Create a custom env template:"
-  echo "  nano $CONFIG_DIR/templates/${project}.env"
-  echo ""
-  echo "  Now run: dev new $project <branch-name>"
-}
-
 cmd_new() {
-  local project="${2:-}" branch="${3:-}" agent="" agents_flag="" run_cmd="" yolo=false attach=false from_branch="" private=false container=false container_env=false
+  local project="${2:-}" branch="${3:-}" agent="" agents_flag="" run_cmd="" yolo=false attach=false from_branch="" private=false container=false container_env=false initial_prompt=""
   shift 2 || true
 
   # Parse options
@@ -1191,6 +1226,8 @@ cmd_new() {
       --run=*) run_cmd="${1#*=}"; shift ;;
       --from) from_branch="${2:-}"; shift 2 ;;
       --from=*) from_branch="${1#*=}"; shift ;;
+      --prompt) initial_prompt="${2:-}"; shift 2 ;;
+      --prompt=*) initial_prompt="${1#*=}"; shift ;;
       --yolo) yolo=true; shift ;;
       --attach) attach=true; shift ;;
       --private) private=true; shift ;;
@@ -1249,8 +1286,8 @@ cmd_new() {
     die "devcontainer CLI not found. Install it with: npm install -g @devcontainers/cli"
   fi
 
-  [ -z "$project" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--container] [--env] [--private]"
-  [ -z "$branch" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--container] [--env] [--private]"
+  [ -z "$project" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--container] [--env] [--private] [--prompt \"...\"]"
+  [ -z "$branch" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--container] [--env] [--private] [--prompt \"...\"]"
 
   local bare_dir="$PROJECTS_DIR/$project"
   local wt_dir="$PROJECTS_DIR/${project}-worktrees"
@@ -1450,17 +1487,34 @@ cmd_new() {
   info "Starting tmux session '$name' with $agent..."
 
   local claude_flags=""
-  [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
+  if [ "$yolo" = true ]; then
+    claude_flags=" --dangerously-skip-permissions"
+    ensure_claude_skip_prompt
+  fi
+
+  # Pre-trust the worktree directory so Claude doesn't prompt
+  # "Do you trust the files in this folder?" on first launch
+  ensure_claude_trust "$worktree_path"
+
+  local prompt_arg=""
+  if [ -n "$initial_prompt" ]; then
+    # Escape shell metacharacters for safe embedding in the sh -c command
+    local escaped_prompt="${initial_prompt//\\/\\\\}"
+    escaped_prompt="${escaped_prompt//\$/\\\$}"
+    escaped_prompt="${escaped_prompt//\`/\\\`}"
+    escaped_prompt="${escaped_prompt//\"/\\\"}"
+    prompt_arg=" \"${escaped_prompt}\""
+  fi
 
   local agent_cmd
   if [ -n "$container_exec_prefix" ]; then
     # Container mode: exec into container for agent commands
     case "$primary_agent" in
       claude)
-        agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && claude${claude_flags}'"
+        agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && claude${claude_flags}${prompt_arg}'"
         ;;
       codex)
-        agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && codex'"
+        agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && codex${prompt_arg}'"
         ;;
       none)
         agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && echo Ready. && bash'"
@@ -1473,10 +1527,10 @@ cmd_new() {
     # Normal mode: run directly on host
     case "$primary_agent" in
       claude)
-        agent_cmd="cd $worktree_path && claude${claude_flags}"
+        agent_cmd="cd $worktree_path && claude${claude_flags}${prompt_arg}"
         ;;
       codex)
-        agent_cmd="cd $worktree_path && codex"
+        agent_cmd="cd $worktree_path && codex${prompt_arg}"
         ;;
       none)
         agent_cmd="cd $worktree_path && echo 'Ready. No agent started.' && bash"
@@ -2328,6 +2382,14 @@ cmd_pr_start() {
   info "PR #${pr_number}: $pr_title"
   info "Branch: $branch (state: $pr_state)"
 
+  # Build the context prompt to pass directly to Claude via --prompt
+  local context_prompt
+  if [ -n "$prompt" ]; then
+    context_prompt="You are continuing work on an existing PR. Read .pr-context.md for the PR details (PR #${pr_number}: ${pr_title}). ${prompt}"
+  else
+    context_prompt="You are continuing work on an existing PR. Read .pr-context.md for the full PR description and context. The PR is #${pr_number}: ${pr_title} (${pr_url}). Review the existing changes and continue working on this PR."
+  fi
+
   # Build args for cmd_new
   local new_args=("new" "$project" "$branch")
   if [ -n "$agents_flag" ]; then
@@ -2336,17 +2398,18 @@ cmd_pr_start() {
     new_args+=("--agent" "$agent")
   fi
   [ "$yolo" = true ] && new_args+=("--yolo")
-  [ "$attach" = false ] && true  # don't pass --attach yet, we send prompt first
   [ "$private" = true ] && new_args+=("--private")
+  new_args+=("--prompt" "$context_prompt")
 
-  # Create the session via cmd_new
+  # Create the session via cmd_new (prompt is passed directly to Claude as CLI arg)
   cmd_new "${new_args[@]}"
 
-  # Build the session name so we can send context to it
+  # Build the session name so we can write PR context file
   local name
   name=$(session_name "$project" "$branch")
 
-  # Write PR context file into the worktree for the agent to reference
+  # Write PR context file into the worktree for the agent to reference.
+  # The worktree already exists (cmd_new creates it synchronously before launching tmux).
   local worktree_path
   worktree_path=$(get_session_field "$name" "path")
 
@@ -2362,20 +2425,7 @@ cmd_pr_start() {
 
 ${pr_body}
 PREOF
-
-    # Send the PR context to the agent
-    local context_prompt
-    if [ -n "$prompt" ]; then
-      context_prompt="You are continuing work on an existing PR. Read .pr-context.md for the PR details (PR #${pr_number}: ${pr_title}). ${prompt}"
-    else
-      context_prompt="You are continuing work on an existing PR. Read .pr-context.md for the full PR description and context. The PR is #${pr_number}: ${pr_title} (${pr_url}). Review the existing changes and continue working on this PR."
-    fi
-
-    # Small delay to let the agent start up
-    sleep 1
-    tmux send-keys -t "$name:agent" -l "$context_prompt"
-    tmux send-keys -t "$name:agent" Enter
-    log "PR context sent to agent"
+    log "PR context written to $worktree_path/.pr-context.md"
   fi
 
   # Update the registry with PR metadata
@@ -3259,7 +3309,12 @@ cmd_restart() {
   fi
 
   local claude_flags=""
-  [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
+  if [ "$yolo" = true ]; then
+    claude_flags=" --dangerously-skip-permissions"
+    ensure_claude_skip_prompt
+  fi
+
+  ensure_claude_trust "$worktree_path"
 
   # Check if session uses a devcontainer
   local container_id container_exec_prefix="" container_workspace=""
@@ -3462,7 +3517,7 @@ cmd_img() {
 cmd_projects() {
   local projects_dir="$CONFIG_DIR/projects"
   if [ ! -d "$projects_dir" ] || [ -z "$(ls -A "$projects_dir" 2>/dev/null)" ]; then
-    echo -e "${DIM}No projects configured. Run 'dev init' to set up a project.${NC}"
+    echo -e "${DIM}No projects configured. Run 'dev setup' to set up a project.${NC}"
     return 0
   fi
 
@@ -3885,7 +3940,12 @@ cmd_agent() {
         config_yolo=$(jq -r '.skip_permissions // false' "$CONFIG_DIR/projects/${project}.json")
         [ "$config_yolo" = "true" ] && yolo=true
       fi
-      [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
+      if [ "$yolo" = true ]; then
+        claude_flags=" --dangerously-skip-permissions"
+        ensure_claude_skip_prompt
+      fi
+
+      ensure_claude_trust "$worktree_path"
 
       # Build agent command (container-aware)
       local agent_cmd
@@ -4621,7 +4681,7 @@ cmd_task() {
 
       # Validate project exists
       [ -d "$CONFIG_DIR/projects" ] && [ -f "$CONFIG_DIR/projects/${project}.json" ] \
-        || die "Project '$project' not found. Run 'dev init' first."
+        || die "Project '$project' not found. Run 'dev setup' first."
 
       local id now tmp
       id=$(jq -r '.next_id' "$TASK_REGISTRY")
@@ -4940,7 +5000,12 @@ cmd_ask() {
 
   # Build agent command
   local claude_flags=""
-  [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
+  if [ "$yolo" = true ]; then
+    claude_flags=" --dangerously-skip-permissions"
+    ensure_claude_skip_prompt
+  fi
+
+  ensure_claude_trust "$tmp_path"
 
   local agent_cmd
   case "$agent" in
@@ -5072,7 +5137,12 @@ cmd_ghost() {
 
   # Build agent command
   local claude_flags=""
-  [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
+  if [ "$yolo" = true ]; then
+    claude_flags=" --dangerously-skip-permissions"
+    ensure_claude_skip_prompt
+  fi
+
+  ensure_claude_trust "$ghost_dir"
 
   local agent_cmd
   case "$agent" in
@@ -5223,7 +5293,12 @@ cmd_review() {
 
   # Build agent command
   local claude_flags=""
-  [ "$yolo" = true ] && claude_flags=" --dangerously-skip-permissions"
+  if [ "$yolo" = true ]; then
+    claude_flags=" --dangerously-skip-permissions"
+    ensure_claude_skip_prompt
+  fi
+
+  ensure_claude_trust "$tmp_path"
 
   # Load review prompt
   local prompt_file=""
@@ -5364,8 +5439,7 @@ cmd_help() {
   dev — Multi-Agent Worktree Manager
 
   SETUP
-    dev init                                Interactive project setup (recommended)
-    dev setup <project> <github-ssh-url>    Quick setup (bare clone only)
+    dev setup [project] [git-url]           Set up a new project (quick or detailed)
     dev projects                            List all configured projects
     dev update [branch]                     Download latest from GitHub and reinstall
     dev help                                Show this help
@@ -5528,9 +5602,9 @@ cmd_help() {
       DEV_SUPA_API_PORT, DEV_SUPA_DB_PORT, DEV_SUPA_STUDIO_PORT
 
   EXAMPLES
-    dev init                                 # interactive setup for new project
-    dev setup klyra git@github.com:org/klyra.git   # SSH
-    dev setup klyra https://github.com/org/klyra.git  # HTTPS
+    dev setup                                # interactive setup for new project
+    dev setup klyra git@github.com:org/klyra.git   # quick setup with args
+    dev setup klyra https://github.com/org/klyra.git  # HTTPS URL also works
     dev new klyra feat/trading-ui --agent claude
     dev new klyra feat/trading-ui --yolo
     dev new klyra fix/auth-bug --agents claude,codex
@@ -5572,7 +5646,6 @@ HELPEOF
 ensure_dirs
 
 case "${1:-help}" in
-  init)      cmd_init "$@" ;;
   setup)     cmd_setup "$@" ;;
   new)       cmd_new "$@" ;;
   ls|list)   cmd_ls "$@" ;;
