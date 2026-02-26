@@ -641,35 +641,38 @@ ensure_devcontainer_json() {
 
   # Build the postCreateCommand as independent steps (separated by ; not &&)
   # so one failing doesn't prevent the rest from running.
+  # Modelled after a proven working Dockerfile:
+  #   1. Copy host Claude config (credentials, settings, plugins)
+  #   2. Mark onboarding complete + trust workspace
+  #   3. Copy SSH keys
+  #   4. Install Claude Code
   local container_workspace
   container_workspace="/workspaces/$(basename "$worktree_path")"
 
-  # Step 1: Mirror the host's entire ~/.claude/ directory (credentials, settings, plugins, etc.)
-  # This gives the container the exact same Claude Code config as the host.
-  local post_create_cmd="if [ -d /tmp/.host-claude ]; then cp -a /tmp/.host-claude/. ~/.claude/ && chmod 600 ~/.claude/.credentials.json 2>/dev/null; fi"
-  # Step 2: Mirror the host's ~/.claude.json, then inject container workspace trust + onboarding flag
-  post_create_cmd="$post_create_cmd ; if [ -f /tmp/.host-claude.json ] && command -v jq >/dev/null; then jq --arg ws \"$container_workspace\" '.hasCompletedOnboarding = true | .projects[\$ws] = {hasTrustDialogAccepted: true, allowedTools: []}' /tmp/.host-claude.json > ~/.claude.json; elif [ -f /tmp/.host-claude.json ]; then cp /tmp/.host-claude.json ~/.claude.json; else echo '{\"hasCompletedOnboarding\": true, \"projects\": {\"$container_workspace\": {\"hasTrustDialogAccepted\": true}}}' > ~/.claude.json; fi"
+  # Step 1: Copy the host's ~/.claude/ directory (credentials, settings, plugins)
+  local post_create_cmd="if [ -d /tmp/.host-claude ]; then mkdir -p ~/.claude && cp -a /tmp/.host-claude/. ~/.claude/ && chmod 600 ~/.claude/.credentials.json 2>/dev/null; fi"
+  # Step 2: Mark onboarding complete and trust the container workspace.
+  # This is the critical step — without hasCompletedOnboarding, Claude shows the welcome flow.
+  # We write a fresh file with just the fields Claude needs (proven pattern from working Dockerfiles).
+  post_create_cmd="$post_create_cmd ; echo '{\"hasCompletedOnboarding\":true,\"projects\":{\"$container_workspace\":{\"hasTrustDialogAccepted\":true,\"allowedTools\":[]}}}' > ~/.claude.json"
   # Step 3: Copy SSH keys from readonly mount
   post_create_cmd="$post_create_cmd ; if [ -d /tmp/.host-ssh ]; then cp -r /tmp/.host-ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/* 2>/dev/null; fi"
-  # Step 4: Install Claude Code
+  # Step 4: Install Claude Code globally
   post_create_cmd="$post_create_cmd ; npm install -g @anthropic-ai/claude-code"
 
   # Build mounts — always include .ssh and .gitconfig
   local mounts_json
   mounts_json=$(jq -n '[
     "source=${localEnv:HOME}/.ssh,target=/tmp/.host-ssh,type=bind,readonly",
-    "source=${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,readonly"
+    "source=${localEnv:HOME}/.gitconfig,target=/home/node/.gitconfig,type=bind,readonly"
   ]')
-  # Mount host's entire ~/.claude/ dir if it exists (credentials, settings, plugins, etc.)
+  # Mount host's entire ~/.claude/ dir (credentials, settings, plugins)
   if [ -d "$HOME/.claude" ]; then
     mounts_json=$(echo "$mounts_json" | jq '. + ["source=${localEnv:HOME}/.claude,target=/tmp/.host-claude,type=bind,readonly"]')
   fi
-  # Mount host's ~/.claude.json if it exists (onboarding state, project trust, etc.)
-  if [ -f "$HOME/.claude.json" ]; then
-    mounts_json=$(echo "$mounts_json" | jq '. + ["source=${localEnv:HOME}/.claude.json,target=/tmp/.host-claude.json,type=bind,readonly"]')
-  fi
 
-  # Generate devcontainer.json using jq for safe JSON construction
+  # Generate devcontainer.json using jq for safe JSON construction.
+  # Uses javascript-node image (Node pre-installed) instead of base + feature.
   jq -n \
     --arg name "${project}-session" \
     --arg node_ver "$node_version" \
@@ -680,14 +683,10 @@ ensure_devcontainer_json() {
     --arg postCreate "$post_create_cmd" \
     '{
       name: $name,
-      image: "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
-      features: {
-        "ghcr.io/devcontainers/features/node:1": { version: $node_ver },
-        "ghcr.io/devcontainers/features/git:1": {}
-      },
+      image: ("mcr.microsoft.com/devcontainers/javascript-node:" + $node_ver),
       containerEnv: $containerEnv,
       mounts: $mounts,
-      remoteUser: "vscode",
+      remoteUser: "node",
       init: true,
       shutdownAction: "none",
       postCreateCommand: $postCreate
@@ -852,10 +851,12 @@ build_agent_cmd() {
     local prefix workspace
     prefix=$(build_container_exec_cmd "$container_id")
     workspace=$(get_container_workspace "$worktree_path")
+    # Use double quotes for bash -lc so inner content can contain single quotes
+    # (e.g., prompts with apostrophes). Workspace paths are always /workspaces/<name>.
     case "$agent_type" in
-      claude) echo "$prefix bash -lc 'cd $workspace && claude${claude_flags}${prompt_arg}'" ;;
-      codex)  echo "$prefix bash -lc 'cd $workspace && codex${prompt_arg}'" ;;
-      none)   echo "$prefix bash -lc 'cd $workspace && echo Ready. && bash'" ;;
+      claude) echo "$prefix bash -lc \"cd $workspace && claude${claude_flags}${prompt_arg}\"" ;;
+      codex)  echo "$prefix bash -lc \"cd $workspace && codex${prompt_arg}\"" ;;
+      none)   echo "$prefix bash -lc \"cd $workspace && echo Ready. && bash\"" ;;
       *)      die "Unknown agent: $agent_type. Use claude, codex, or none." ;;
     esac
   else
@@ -879,7 +880,8 @@ build_window_cmd() {
     local prefix workspace
     prefix=$(build_container_exec_cmd "$container_id")
     workspace=$(get_container_workspace "$worktree_path")
-    echo "$prefix bash -lc 'cd $workspace && $inner_cmd'"
+    # Use double quotes for bash -lc so inner_cmd can contain single quotes
+    echo "$prefix bash -lc \"cd $workspace && $inner_cmd\""
   else
     echo "cd $worktree_path && $inner_cmd"
   fi
@@ -1593,9 +1595,11 @@ cmd_new() {
     ) 200>"${PORT_REGISTRY}.lock"
   fi
 
-  # Source secrets
+  # Source secrets for tmux windows.
+  # In container mode, secrets are passed via --remote-env at container start,
+  # so env_prefix is not needed (docker exec doesn't inherit parent env anyway).
   local env_prefix=""
-  if [ -f "$SECRETS_FILE" ]; then
+  if [ "$container" != true ] && [ -f "$SECRETS_FILE" ]; then
     env_prefix="source $SECRETS_FILE && "
   fi
 
@@ -1608,12 +1612,15 @@ cmd_new() {
   local claude_flags=""
   if [ "$yolo" = true ]; then
     claude_flags=" --dangerously-skip-permissions"
-    ensure_claude_skip_prompt
+    # In container mode, settings.json is already copied from host in postCreateCommand.
+    # On host, ensure the skip prompt setting exists.
+    [ "$container" != true ] && ensure_claude_skip_prompt
   fi
 
   # Pre-trust the worktree directory so Claude doesn't prompt
-  # "Do you trust the files in this folder?" on first launch
-  ensure_claude_trust "$worktree_path"
+  # "Do you trust the files in this folder?" on first launch.
+  # In container mode, trust is set for the container workspace path in postCreateCommand.
+  [ "$container" != true ] && ensure_claude_trust "$worktree_path"
 
   local prompt_arg=""
   if [ -n "$initial_prompt" ]; then
@@ -3356,9 +3363,13 @@ cmd_restart() {
   # Kill existing tmux session
   tmux kill-session -t "$match" 2>/dev/null || true
 
-  # Source secrets
+  # Check if session uses a devcontainer
+  local container_id
+  container_id=$(get_session_field "$match" "container_id")
+
+  # Source secrets — skip in container mode (secrets passed via --remote-env)
   local env_prefix=""
-  if [ -f "$SECRETS_FILE" ]; then
+  if [ -z "$container_id" ] && [ -f "$SECRETS_FILE" ]; then
     env_prefix="source $SECRETS_FILE && "
   fi
 
@@ -3389,14 +3400,11 @@ cmd_restart() {
   local claude_flags=""
   if [ "$yolo" = true ]; then
     claude_flags=" --dangerously-skip-permissions"
-    ensure_claude_skip_prompt
+    [ -z "$container_id" ] && ensure_claude_skip_prompt
   fi
 
-  ensure_claude_trust "$worktree_path"
-
-  # Check if session uses a devcontainer
-  local container_id
-  container_id=$(get_session_field "$match" "container_id")
+  # Trust only needed on host — container handles it in postCreateCommand
+  [ -z "$container_id" ] && ensure_claude_trust "$worktree_path"
   if [ -n "$container_id" ]; then
     # Ensure container is running, restart it if needed
     if ! docker inspect "$container_id" --format '{{.State.Status}}' 2>/dev/null | grep -q "running"; then
@@ -3976,9 +3984,14 @@ cmd_agent() {
       local worktree_path
       worktree_path=$(get_session_field "$match" "path")
 
-      # Source secrets
+      # Build agent command (container-aware)
+      local agent_cmd
+      local cid
+      cid=$(get_session_field "$match" "container_id")
+
+      # Source secrets — skip in container mode (secrets passed via --remote-env)
       local env_prefix=""
-      if [ -f "$SECRETS_FILE" ]; then
+      if [ -z "$cid" ] && [ -f "$SECRETS_FILE" ]; then
         env_prefix="source $SECRETS_FILE && "
       fi
 
@@ -3992,15 +4005,11 @@ cmd_agent() {
       fi
       if [ "$yolo" = true ]; then
         claude_flags=" --dangerously-skip-permissions"
-        ensure_claude_skip_prompt
+        [ -z "$cid" ] && ensure_claude_skip_prompt
       fi
 
-      ensure_claude_trust "$worktree_path"
-
-      # Build agent command (container-aware)
-      local agent_cmd
-      local cid
-      cid=$(get_session_field "$match" "container_id")
+      # Trust only needed on host — container handles it in postCreateCommand
+      [ -z "$cid" ] && ensure_claude_trust "$worktree_path"
       if [ -n "$cid" ]; then
         # Verify container is running before trying to exec into it
         if ! docker inspect "$cid" --format '{{.State.Status}}' 2>/dev/null | grep -q "running"; then
