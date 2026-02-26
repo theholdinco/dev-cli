@@ -639,16 +639,36 @@ ensure_devcontainer_json() {
     fi
   done
 
-  # Build the postCreateCommand: copy SSH keys, install Claude Code, pre-approve trust
+  # Build the postCreateCommand: copy host configs, install Claude Code, skip onboarding
   local container_workspace
   container_workspace="/workspaces/$(basename "$worktree_path")"
-  # SSH keys are bind-mounted readonly — copy them so git operations work
+
+  # SSH keys: copy from readonly mount so git push/pull works
   local post_create_cmd="if [ -d /tmp/.host-ssh ]; then cp -r /tmp/.host-ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/* 2>/dev/null; fi"
-  post_create_cmd="$post_create_cmd && npm install -g @anthropic-ai/claude-code"
-  # Pre-approve workspace trust so Claude doesn't prompt on first launch
+  # Claude credentials: copy OAuth tokens so login is skipped
   post_create_cmd="$post_create_cmd && mkdir -p ~/.claude"
-  post_create_cmd="$post_create_cmd && echo '{\"skipDangerousModePermissionPrompt\": true}' > ~/.claude/settings.json"
-  post_create_cmd="$post_create_cmd && echo '{\"projects\": {\"$container_workspace\": {\"hasTrustDialogAccepted\": true}}}' > ~/.claude.json"
+  post_create_cmd="$post_create_cmd && if [ -f /tmp/.host-claude-credentials ]; then cp /tmp/.host-claude-credentials ~/.claude/.credentials.json && chmod 600 ~/.claude/.credentials.json; fi"
+  # Copy host settings.json if mounted, otherwise create minimal one
+  post_create_cmd="$post_create_cmd && if [ -f /tmp/.host-claude-settings ]; then cp /tmp/.host-claude-settings ~/.claude/settings.json; else echo '{\"skipDangerousModePermissionPrompt\": true}' > ~/.claude/settings.json; fi"
+  # Install Claude Code
+  post_create_cmd="$post_create_cmd && npm install -g @anthropic-ai/claude-code"
+  # Mark onboarding complete and trust the workspace so Claude starts without prompts
+  post_create_cmd="$post_create_cmd && echo '{\"hasCompletedOnboarding\": true, \"projects\": {\"$container_workspace\": {\"hasTrustDialogAccepted\": true, \"allowedTools\": []}}}' > ~/.claude.json"
+
+  # Build mounts array — always mount .ssh and .gitconfig, conditionally mount Claude configs
+  local mounts_json
+  mounts_json=$(jq -n '[
+    "source=${localEnv:HOME}/.ssh,target=/tmp/.host-ssh,type=bind,readonly",
+    "source=${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,readonly"
+  ]')
+  # Mount Claude credentials if they exist on host
+  if [ -f "$HOME/.claude/.credentials.json" ]; then
+    mounts_json=$(echo "$mounts_json" | jq '. + ["source=${localEnv:HOME}/.claude/.credentials.json,target=/tmp/.host-claude-credentials,type=bind,readonly"]')
+  fi
+  # Mount Claude settings if they exist on host
+  if [ -f "$HOME/.claude/settings.json" ]; then
+    mounts_json=$(echo "$mounts_json" | jq '. + ["source=${localEnv:HOME}/.claude/settings.json,target=/tmp/.host-claude-settings,type=bind,readonly"]')
+  fi
 
   # Generate devcontainer.json using jq for safe JSON construction
   jq -n \
@@ -656,6 +676,7 @@ ensure_devcontainer_json() {
     --arg node_ver "$node_version" \
     --argjson containerEnv "$container_env_json" \
     --argjson remoteEnv "$remote_env_json" \
+    --argjson mounts "$mounts_json" \
     --arg pass_env "$pass_env" \
     --arg postCreate "$post_create_cmd" \
     '{
@@ -666,10 +687,7 @@ ensure_devcontainer_json() {
         "ghcr.io/devcontainers/features/git:1": {}
       },
       containerEnv: $containerEnv,
-      mounts: [
-        "source=${localEnv:HOME}/.ssh,target=/tmp/.host-ssh,type=bind,readonly",
-        "source=${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,readonly"
-      ],
+      mounts: $mounts,
       remoteUser: "vscode",
       init: true,
       shutdownAction: "none",
