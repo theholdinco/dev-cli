@@ -639,35 +639,34 @@ ensure_devcontainer_json() {
     fi
   done
 
-  # Build the postCreateCommand: copy host configs, install Claude Code, skip onboarding
+  # Build the postCreateCommand as independent steps (separated by ; not &&)
+  # so one failing doesn't prevent the rest from running.
   local container_workspace
   container_workspace="/workspaces/$(basename "$worktree_path")"
 
-  # SSH keys: copy from readonly mount so git push/pull works
-  local post_create_cmd="if [ -d /tmp/.host-ssh ]; then cp -r /tmp/.host-ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/* 2>/dev/null; fi"
-  # Claude credentials: copy OAuth tokens so login is skipped
-  post_create_cmd="$post_create_cmd && mkdir -p ~/.claude"
-  post_create_cmd="$post_create_cmd && if [ -f /tmp/.host-claude-credentials ]; then cp /tmp/.host-claude-credentials ~/.claude/.credentials.json && chmod 600 ~/.claude/.credentials.json; fi"
-  # Copy host settings.json if mounted, otherwise create minimal one
-  post_create_cmd="$post_create_cmd && if [ -f /tmp/.host-claude-settings ]; then cp /tmp/.host-claude-settings ~/.claude/settings.json; else echo '{\"skipDangerousModePermissionPrompt\": true}' > ~/.claude/settings.json; fi"
-  # Install Claude Code
-  post_create_cmd="$post_create_cmd && npm install -g @anthropic-ai/claude-code"
-  # Mark onboarding complete and trust the workspace so Claude starts without prompts
-  post_create_cmd="$post_create_cmd && echo '{\"hasCompletedOnboarding\": true, \"projects\": {\"$container_workspace\": {\"hasTrustDialogAccepted\": true, \"allowedTools\": []}}}' > ~/.claude.json"
+  # Step 1: Mirror the host's entire ~/.claude/ directory (credentials, settings, plugins, etc.)
+  # This gives the container the exact same Claude Code config as the host.
+  local post_create_cmd="if [ -d /tmp/.host-claude ]; then cp -a /tmp/.host-claude/. ~/.claude/ && chmod 600 ~/.claude/.credentials.json 2>/dev/null; fi"
+  # Step 2: Mirror the host's ~/.claude.json, then inject container workspace trust + onboarding flag
+  post_create_cmd="$post_create_cmd ; if [ -f /tmp/.host-claude.json ] && command -v jq >/dev/null; then jq --arg ws \"$container_workspace\" '.hasCompletedOnboarding = true | .projects[\$ws] = {hasTrustDialogAccepted: true, allowedTools: []}' /tmp/.host-claude.json > ~/.claude.json; elif [ -f /tmp/.host-claude.json ]; then cp /tmp/.host-claude.json ~/.claude.json; else echo '{\"hasCompletedOnboarding\": true, \"projects\": {\"$container_workspace\": {\"hasTrustDialogAccepted\": true}}}' > ~/.claude.json; fi"
+  # Step 3: Copy SSH keys from readonly mount
+  post_create_cmd="$post_create_cmd ; if [ -d /tmp/.host-ssh ]; then cp -r /tmp/.host-ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/* 2>/dev/null; fi"
+  # Step 4: Install Claude Code
+  post_create_cmd="$post_create_cmd ; npm install -g @anthropic-ai/claude-code"
 
-  # Build mounts array — always mount .ssh and .gitconfig, conditionally mount Claude configs
+  # Build mounts — always include .ssh and .gitconfig
   local mounts_json
   mounts_json=$(jq -n '[
     "source=${localEnv:HOME}/.ssh,target=/tmp/.host-ssh,type=bind,readonly",
     "source=${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,readonly"
   ]')
-  # Mount Claude credentials if they exist on host
-  if [ -f "$HOME/.claude/.credentials.json" ]; then
-    mounts_json=$(echo "$mounts_json" | jq '. + ["source=${localEnv:HOME}/.claude/.credentials.json,target=/tmp/.host-claude-credentials,type=bind,readonly"]')
+  # Mount host's entire ~/.claude/ dir if it exists (credentials, settings, plugins, etc.)
+  if [ -d "$HOME/.claude" ]; then
+    mounts_json=$(echo "$mounts_json" | jq '. + ["source=${localEnv:HOME}/.claude,target=/tmp/.host-claude,type=bind,readonly"]')
   fi
-  # Mount Claude settings if they exist on host
-  if [ -f "$HOME/.claude/settings.json" ]; then
-    mounts_json=$(echo "$mounts_json" | jq '. + ["source=${localEnv:HOME}/.claude/settings.json,target=/tmp/.host-claude-settings,type=bind,readonly"]')
+  # Mount host's ~/.claude.json if it exists (onboarding state, project trust, etc.)
+  if [ -f "$HOME/.claude.json" ]; then
+    mounts_json=$(echo "$mounts_json" | jq '. + ["source=${localEnv:HOME}/.claude.json,target=/tmp/.host-claude.json,type=bind,readonly"]')
   fi
 
   # Generate devcontainer.json using jq for safe JSON construction
