@@ -636,7 +636,7 @@ ensure_devcontainer_json() {
       remoteUser: "vscode",
       init: true,
       shutdownAction: "none",
-      postCreateCommand: "sudo chown -R vscode:vscode /home/vscode/.ssh 2>/dev/null || true"
+      postCreateCommand: "sudo chown -R vscode:vscode /home/vscode/.ssh 2>/dev/null || true && npm install -g @anthropic-ai/claude-code"
     }
     + (if $pass_env == "true" and ($remoteEnv | length > 0) then {remoteEnv: $remoteEnv} else {} end)' \
     > "$dc_file"
