@@ -268,11 +268,14 @@ get_tmux_windows() {
   echo "$windows"
 }
 
-# Create tmux windows from config, replacing the hardcoded 3-window setup
-# Args: session_name project worktree_path env_prefix agent_cmd run_cmd frontend backend ip
+# Create tmux windows from config, replacing the hardcoded 3-window setup.
+# When a container_id is provided, ALL windows (shell, server, custom) exec into
+# the container so behaviour is identical to host mode.
+# Args: session_name project worktree_path env_prefix agent_cmd run_cmd frontend backend ip [container_id]
 create_tmux_windows() {
   local session="$1" project="$2" worktree="$3" env_prefix="$4" agent_cmd="$5"
   local run_cmd="$6" frontend="$7" backend="$8" ip="$9"
+  local container_id="${10:-}"
 
   local windows
   windows=$(get_tmux_windows "$project")
@@ -302,14 +305,16 @@ create_tmux_windows() {
       [ -z "$url_lines" ] && url_lines="No dev server ports allocated."
 
       if [ -n "$run_cmd" ]; then
-        resolved_cmd="$port_exports && cd $worktree && echo '$url_lines' && echo 'Running: $run_cmd' && echo '─────────────────────────────────────' && $run_cmd; bash"
+        local server_inner="echo '$url_lines' && echo 'Running: $run_cmd' && echo '─────────────────────────────────────' && $run_cmd; bash"
+        resolved_cmd="$port_exports && $(build_window_cmd "$worktree" "$container_id" "$server_inner")"
       else
-        resolved_cmd="$port_exports && cd $worktree && echo '$url_lines' && echo 'Run your dev server here.' && bash"
+        local server_inner="echo '$url_lines' && echo 'Run your dev server here.' && bash"
+        resolved_cmd="$port_exports && $(build_window_cmd "$worktree" "$container_id" "$server_inner")"
       fi
     elif [ -n "$win_command" ]; then
-      resolved_cmd="cd $worktree && $win_command"
+      resolved_cmd=$(build_window_cmd "$worktree" "$container_id" "$win_command")
     else
-      resolved_cmd="cd $worktree && bash"
+      resolved_cmd=$(build_window_cmd "$worktree" "$container_id")
     fi
 
     if [ "$first" = true ]; then
@@ -622,10 +627,23 @@ ensure_devcontainer_json() {
     fi
   fi
 
-  # Build the postCreateCommand: install Claude Code + pre-approve workspace trust
+  # Detect Node version from project's .nvmrc or .node-version, fall back to lts
+  local node_version="lts"
+  for nv_file in "$worktree_path/.nvmrc" "$worktree_path/.node-version"; do
+    if [ -f "$nv_file" ]; then
+      local nv
+      nv=$(tr -d '[:space:]' < "$nv_file")
+      nv="${nv#v}"  # strip leading v
+      [ -n "$nv" ] && node_version="$nv"
+      break
+    fi
+  done
+
+  # Build the postCreateCommand: copy SSH keys, install Claude Code, pre-approve trust
   local container_workspace
   container_workspace="/workspaces/$(basename "$worktree_path")"
-  local post_create_cmd="sudo chown -R vscode:vscode /home/vscode/.ssh 2>/dev/null || true"
+  # SSH keys are bind-mounted readonly — copy them so git operations work
+  local post_create_cmd="if [ -d /tmp/.host-ssh ]; then cp -r /tmp/.host-ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/* 2>/dev/null; fi"
   post_create_cmd="$post_create_cmd && npm install -g @anthropic-ai/claude-code"
   # Pre-approve workspace trust so Claude doesn't prompt on first launch
   post_create_cmd="$post_create_cmd && mkdir -p ~/.claude"
@@ -635,6 +653,7 @@ ensure_devcontainer_json() {
   # Generate devcontainer.json using jq for safe JSON construction
   jq -n \
     --arg name "${project}-session" \
+    --arg node_ver "$node_version" \
     --argjson containerEnv "$container_env_json" \
     --argjson remoteEnv "$remote_env_json" \
     --arg pass_env "$pass_env" \
@@ -643,12 +662,12 @@ ensure_devcontainer_json() {
       name: $name,
       image: "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
       features: {
-        "ghcr.io/devcontainers/features/node:1": { version: "20" },
+        "ghcr.io/devcontainers/features/node:1": { version: $node_ver },
         "ghcr.io/devcontainers/features/git:1": {}
       },
       containerEnv: $containerEnv,
       mounts: [
-        "source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind,readonly",
+        "source=${localEnv:HOME}/.ssh,target=/tmp/.host-ssh,type=bind,readonly",
         "source=${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,readonly"
       ],
       remoteUser: "vscode",
@@ -802,6 +821,50 @@ get_container_workspace() {
   local dir_name
   dir_name=$(basename "$worktree_path")
   echo "/workspaces/$dir_name"
+}
+
+# Build the shell command for running an agent, container-aware.
+# Usage: agent_cmd=$(build_agent_cmd <agent_type> <worktree_path> [container_id] [claude_flags] [prompt_arg])
+# Returns a shell string suitable for tmux new-window / new-session.
+build_agent_cmd() {
+  local agent_type="$1" worktree_path="$2"
+  local container_id="${3:-}" claude_flags="${4:-}" prompt_arg="${5:-}"
+
+  if [ -n "$container_id" ]; then
+    local prefix workspace
+    prefix=$(build_container_exec_cmd "$container_id")
+    workspace=$(get_container_workspace "$worktree_path")
+    case "$agent_type" in
+      claude) echo "$prefix bash -lc 'cd $workspace && claude${claude_flags}${prompt_arg}'" ;;
+      codex)  echo "$prefix bash -lc 'cd $workspace && codex${prompt_arg}'" ;;
+      none)   echo "$prefix bash -lc 'cd $workspace && echo Ready. && bash'" ;;
+      *)      die "Unknown agent: $agent_type. Use claude, codex, or none." ;;
+    esac
+  else
+    case "$agent_type" in
+      claude) echo "cd $worktree_path && claude${claude_flags}${prompt_arg}" ;;
+      codex)  echo "cd $worktree_path && codex${prompt_arg}" ;;
+      none)   echo "cd $worktree_path && echo 'Ready. No agent started.' && bash" ;;
+      *)      die "Unknown agent: $agent_type. Use claude, codex, or none." ;;
+    esac
+  fi
+}
+
+# Build a shell command for the shell/server windows, container-aware.
+# Usage: shell_cmd=$(build_window_cmd <worktree_path> [container_id] [inner_cmd])
+# If container_id is set, runs inside the container. Otherwise runs on host.
+# inner_cmd defaults to "bash" if not provided.
+build_window_cmd() {
+  local worktree_path="$1" container_id="${2:-}" inner_cmd="${3:-bash}"
+
+  if [ -n "$container_id" ]; then
+    local prefix workspace
+    prefix=$(build_container_exec_cmd "$container_id")
+    workspace=$(get_container_workspace "$worktree_path")
+    echo "$prefix bash -lc 'cd $workspace && $inner_cmd'"
+  else
+    echo "cd $worktree_path && $inner_cmd"
+  fi
 }
 
 # ── Supabase Config ─────────────────────────────────────────────────────────
@@ -1476,8 +1539,6 @@ cmd_new() {
 
   # ── Devcontainer setup (when --container is used) ────────────────────────
   local container_id=""
-  local container_exec_prefix=""
-  local container_workspace=""
 
   if [ "$container" = true ]; then
     # Generate devcontainer.json if the project doesn't have one
@@ -1493,8 +1554,6 @@ cmd_new() {
 
     # Devcontainer started successfully — remove the cleanup trap
     trap - EXIT
-    container_exec_prefix=$(build_container_exec_cmd "$container_id")
-    container_workspace=$(get_container_workspace "$worktree_path")
   fi
 
   # Register in port registry (include container_id if present)
@@ -1549,45 +1608,13 @@ cmd_new() {
   fi
 
   local agent_cmd
-  if [ -n "$container_exec_prefix" ]; then
-    # Container mode: exec into container for agent commands
-    case "$primary_agent" in
-      claude)
-        agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && claude${claude_flags}${prompt_arg}'"
-        ;;
-      codex)
-        agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && codex${prompt_arg}'"
-        ;;
-      none)
-        agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && echo Ready. && bash'"
-        ;;
-      *)
-        die "Unknown agent: $primary_agent. Use claude, codex, or none."
-        ;;
-    esac
-  else
-    # Normal mode: run directly on host
-    case "$primary_agent" in
-      claude)
-        agent_cmd="cd $worktree_path && claude${claude_flags}${prompt_arg}"
-        ;;
-      codex)
-        agent_cmd="cd $worktree_path && codex${prompt_arg}"
-        ;;
-      none)
-        agent_cmd="cd $worktree_path && echo 'Ready. No agent started.' && bash"
-        ;;
-      *)
-        die "Unknown agent: $primary_agent. Use claude, codex, or none."
-        ;;
-    esac
-  fi
+  agent_cmd=$(build_agent_cmd "$primary_agent" "$worktree_path" "$container_id" "$claude_flags" "$prompt_arg")
 
   # Set port env vars on tmux session so all windows/panes inherit them.
   local ip
   ip=$(get_ip)
 
-  create_tmux_windows "$name" "$project" "$worktree_path" "$env_prefix" "$agent_cmd" "$run_cmd" "$wt_frontend" "$wt_backend" "$ip"
+  create_tmux_windows "$name" "$project" "$worktree_path" "$env_prefix" "$agent_cmd" "$run_cmd" "$wt_frontend" "$wt_backend" "$ip" "$container_id"
 
   # Create additional agent windows for dual-agent mode
   local IFS_BAK="$IFS"
@@ -1596,19 +1623,7 @@ cmd_new() {
   if [ ${#agent_list[@]} -gt 1 ]; then
     for extra_agent in "${agent_list[@]:1}"; do
       local extra_cmd
-      if [ -n "$container_exec_prefix" ]; then
-        case "$extra_agent" in
-          claude) extra_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && claude${claude_flags}'" ;;
-          codex)  extra_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && codex'" ;;
-          *)      warn "Unknown agent '$extra_agent', skipping"; continue ;;
-        esac
-      else
-        case "$extra_agent" in
-          claude) extra_cmd="cd $worktree_path && claude${claude_flags}" ;;
-          codex)  extra_cmd="cd $worktree_path && codex" ;;
-          *)      warn "Unknown agent '$extra_agent', skipping"; continue ;;
-        esac
-      fi
+      extra_cmd=$(build_agent_cmd "$extra_agent" "$worktree_path" "$container_id" "$claude_flags") || { warn "Unknown agent '$extra_agent', skipping"; continue; }
       tmux new-window -t "$name" -n "agent-${extra_agent}" "${env_prefix}${extra_cmd}"
       info "Added agent window: agent-${extra_agent}"
     done
@@ -2646,6 +2661,9 @@ cmd_shell() {
   local shell_cid
   shell_cid=$(get_session_field "$match" "container_id")
   if [ -n "$shell_cid" ]; then
+    if ! docker inspect "$shell_cid" --format '{{.State.Status}}' 2>/dev/null | grep -q "running"; then
+      die "Container ${shell_cid:0:12} is not running. Use 'dev restart $match' to restart."
+    fi
     local shell_workspace
     shell_workspace=$(get_container_workspace "$(get_session_field "$match" "path")")
     info "Opening shell inside container ${shell_cid:0:12}..."
@@ -3359,7 +3377,7 @@ cmd_restart() {
   ensure_claude_trust "$worktree_path"
 
   # Check if session uses a devcontainer
-  local container_id container_exec_prefix="" container_workspace=""
+  local container_id
   container_id=$(get_session_field "$match" "container_id")
   if [ -n "$container_id" ]; then
     # Ensure container is running, restart it if needed
@@ -3381,31 +3399,15 @@ cmd_restart() {
         fix_registry_perms
       ) 200>"${PORT_REGISTRY}.lock"
     fi
-    container_exec_prefix=$(build_container_exec_cmd "$container_id")
-    container_workspace=$(get_container_workspace "$worktree_path")
   fi
 
   # Recreate tmux session with primary agent
   local agent_cmd
-  if [ -n "$container_exec_prefix" ]; then
-    case "$primary_agent" in
-      claude) agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && claude${claude_flags}'" ;;
-      codex)  agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && codex'" ;;
-      none)   agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && echo Ready. && bash'" ;;
-      *)      agent_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && bash'" ;;
-    esac
-  else
-    case "$primary_agent" in
-      claude) agent_cmd="cd $worktree_path && claude${claude_flags}" ;;
-      codex)  agent_cmd="cd $worktree_path && codex" ;;
-      none)   agent_cmd="cd $worktree_path && echo 'Ready. No agent started.' && bash" ;;
-      *)      agent_cmd="cd $worktree_path && bash" ;;
-    esac
-  fi
+  agent_cmd=$(build_agent_cmd "$primary_agent" "$worktree_path" "$container_id" "$claude_flags")
 
   local ip
   ip=$(get_ip)
-  create_tmux_windows "$match" "$project" "$worktree_path" "$env_prefix" "$agent_cmd" "$run_cmd" "$frontend" "$backend" "$ip"
+  create_tmux_windows "$match" "$project" "$worktree_path" "$env_prefix" "$agent_cmd" "$run_cmd" "$frontend" "$backend" "$ip" "$container_id"
 
   # Create additional agent windows for dual-agent mode
   local IFS_BAK="$IFS"
@@ -3414,19 +3416,7 @@ cmd_restart() {
   if [ ${#agent_list[@]} -gt 1 ]; then
     for extra_agent in "${agent_list[@]:1}"; do
       local extra_cmd
-      if [ -n "$container_exec_prefix" ]; then
-        case "$extra_agent" in
-          claude) extra_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && claude${claude_flags}'" ;;
-          codex)  extra_cmd="$container_exec_prefix bash -lc 'cd $container_workspace && codex'" ;;
-          *)      warn "Unknown agent '$extra_agent', skipping"; continue ;;
-        esac
-      else
-        case "$extra_agent" in
-          claude) extra_cmd="cd $worktree_path && claude${claude_flags}" ;;
-          codex)  extra_cmd="cd $worktree_path && codex" ;;
-          *)      warn "Unknown agent '$extra_agent', skipping"; continue ;;
-        esac
-      fi
+      extra_cmd=$(build_agent_cmd "$extra_agent" "$worktree_path" "$container_id" "$claude_flags") || { warn "Unknown agent '$extra_agent', skipping"; continue; }
       tmux new-window -t "$match" -n "agent-${extra_agent}" "${env_prefix}${extra_cmd}"
     done
   fi
@@ -3998,19 +3988,8 @@ cmd_agent() {
         if ! docker inspect "$cid" --format '{{.State.Status}}' 2>/dev/null | grep -q "running"; then
           die "Container ${cid:0:12} is not running. Use 'dev restart $match' to restart the session."
         fi
-        local cprefix cworkspace
-        cprefix=$(build_container_exec_cmd "$cid")
-        cworkspace=$(get_container_workspace "$worktree_path")
-        case "$agent_type" in
-          claude) agent_cmd="$cprefix bash -lc 'cd $cworkspace && claude${claude_flags}'" ;;
-          codex)  agent_cmd="$cprefix bash -lc 'cd $cworkspace && codex'" ;;
-        esac
-      else
-        case "$agent_type" in
-          claude) agent_cmd="cd $worktree_path && claude${claude_flags}" ;;
-          codex)  agent_cmd="cd $worktree_path && codex" ;;
-        esac
       fi
+      agent_cmd=$(build_agent_cmd "$agent_type" "$worktree_path" "$cid" "$claude_flags")
 
       # Create new tmux window named agent-<type>
       tmux new-window -t "$match" -n "agent-${agent_type}" "${env_prefix}${agent_cmd}"
