@@ -216,6 +216,35 @@ ensure_claude_skip_prompt() {
   fi
 }
 
+# Pre-approve a directory in ~/.claude.json so Claude Code skips the
+# "Do you trust the files in this folder?" dialog on first launch.
+# Claude stores trust state in .projects.<path>.hasTrustDialogAccepted.
+# Called unconditionally (not just for --yolo) because the trust dialog
+# appears regardless of permission mode.
+ensure_claude_trust() {
+  local dir="$1"
+  local claude_json="$HOME/.claude.json"
+
+  (
+    flock -x 200
+
+    if [ ! -f "$claude_json" ]; then
+      jq -n --arg p "$dir" '{projects: {($p): {hasTrustDialogAccepted: true}}}' > "$claude_json"
+      return 0
+    fi
+
+    local already
+    already=$(jq -r --arg p "$dir" '.projects[$p].hasTrustDialogAccepted // false' "$claude_json" 2>/dev/null)
+    [ "$already" = "true" ] && return 0
+
+    local tmp="$claude_json.tmp.$$"
+    jq --arg p "$dir" \
+      '.projects[$p] = (.projects[$p] // {}) | .projects[$p].hasTrustDialogAccepted = true' \
+      "$claude_json" > "$tmp" && mv "$tmp" "$claude_json" \
+      || { rm -f "$tmp"; return 0; }
+  ) 200>"$claude_json.lock"
+}
+
 # Return tmux windows JSON array: project config > global config > defaults
 get_tmux_windows() {
   local project="${1:-}"
@@ -1201,6 +1230,10 @@ cmd_new() {
     claude_flags=" --dangerously-skip-permissions"
     ensure_claude_skip_prompt
   fi
+
+  # Pre-trust the worktree directory so Claude doesn't prompt
+  # "Do you trust the files in this folder?" on first launch
+  ensure_claude_trust "$worktree_path"
 
   local agent_cmd
   local prompt_arg=""
@@ -2952,6 +2985,8 @@ cmd_restart() {
     ensure_claude_skip_prompt
   fi
 
+  ensure_claude_trust "$worktree_path"
+
   # Recreate tmux session with primary agent
   local agent_cmd
   case "$primary_agent" in
@@ -3510,6 +3545,8 @@ cmd_agent() {
         claude_flags=" --dangerously-skip-permissions"
         ensure_claude_skip_prompt
       fi
+
+      ensure_claude_trust "$worktree_path"
 
       # Build agent command
       local agent_cmd
@@ -4553,6 +4590,8 @@ cmd_ask() {
     ensure_claude_skip_prompt
   fi
 
+  ensure_claude_trust "$tmp_path"
+
   local agent_cmd
   case "$agent" in
     claude)
@@ -4687,6 +4726,8 @@ cmd_ghost() {
     claude_flags=" --dangerously-skip-permissions"
     ensure_claude_skip_prompt
   fi
+
+  ensure_claude_trust "$ghost_dir"
 
   local agent_cmd
   case "$agent" in
@@ -4841,6 +4882,8 @@ cmd_review() {
     claude_flags=" --dangerously-skip-permissions"
     ensure_claude_skip_prompt
   fi
+
+  ensure_claude_trust "$tmp_path"
 
   # Load review prompt
   local prompt_file=""
