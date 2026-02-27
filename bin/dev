@@ -653,7 +653,7 @@ ensure_devcontainer_json() {
   if [ -f "$SECRETS_FILE" ]; then
     for api_key_name in "${CONTAINER_API_KEYS[@]}"; do
       local api_key_line
-      api_key_line=$(grep -E "^${api_key_name}=" "$SECRETS_FILE" 2>/dev/null | head -1)
+      api_key_line=$(grep -E "^${api_key_name}=" "$SECRETS_FILE" 2>/dev/null | head -1) || true
       if [ -n "$api_key_line" ]; then
         local val="${api_key_line#*=}"
         val="${val#\"}" ; val="${val%\"}"
