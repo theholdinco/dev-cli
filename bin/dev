@@ -22,6 +22,7 @@ LOG_DIR="$CONFIG_DIR/logs"
 # API key env vars that are always passed into devcontainers.
 # Add new model provider keys here as needed.
 CONTAINER_API_KEYS=(
+  CLAUDE_CODE_OAUTH_TOKEN
   ANTHROPIC_API_KEY
   OPENAI_API_KEY
 )
@@ -250,6 +251,38 @@ ensure_claude_trust() {
       "$claude_json" > "$tmp" && mv "$tmp" "$claude_json" \
       || { rm -f "$tmp"; return 0; }
   ) 200>"$claude_json.lock"
+}
+
+# Build env_prefix string for sourcing secrets.
+# secrets.env is the single source of truth for authentication.
+build_env_prefix() {
+  if [ ! -f "$SECRETS_FILE" ]; then
+    echo ""
+    return
+  fi
+  # Remove stale OAuth credentials file to prevent auth conflicts
+  rm -f "$HOME/.claude/.credentials.json"
+  echo "set -a && source $SECRETS_FILE && set +a && "
+}
+
+# Validate Claude auth configuration in secrets.env.
+# Dies on conflict (both keys set), warns if neither is set.
+validate_claude_auth() {
+  local has_oauth=false has_api_key=false
+  if [ -f "$SECRETS_FILE" ]; then
+    grep -qE '^CLAUDE_CODE_OAUTH_TOKEN=' "$SECRETS_FILE" 2>/dev/null && has_oauth=true
+    grep -qE '^ANTHROPIC_API_KEY=' "$SECRETS_FILE" 2>/dev/null && has_api_key=true
+  fi
+  if [ "$has_oauth" = true ] && [ "$has_api_key" = true ]; then
+    die "Auth conflict: both CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are set in $SECRETS_FILE. Keep only one."
+  fi
+  if [ "$has_oauth" = false ] && [ "$has_api_key" = false ]; then
+    warn "No Claude auth found in $SECRETS_FILE. Add one of:"
+    warn "  CLAUDE_CODE_OAUTH_TOKEN=...  (Pro/Max subscription — run: claude setup-token)"
+    warn "  ANTHROPIC_API_KEY=sk-ant-... (API billing — pay per token)"
+    return 1
+  fi
+  return 0
 }
 
 # Return tmux windows JSON array: project config > global config > defaults
@@ -657,7 +690,7 @@ ensure_devcontainer_json() {
   container_workspace="/workspaces/$(basename "$worktree_path")"
 
   # Step 1: Copy the host's ~/.claude/ directory (credentials, settings, plugins)
-  local post_create_cmd="if [ -d /tmp/.host-claude ]; then mkdir -p ~/.claude && cp -a /tmp/.host-claude/. ~/.claude/ && chmod 600 ~/.claude/.credentials.json 2>/dev/null; fi"
+  local post_create_cmd="if [ -d /tmp/.host-claude ]; then mkdir -p ~/.claude && cp -a /tmp/.host-claude/. ~/.claude/ && rm -f ~/.claude/.credentials.json; fi"
   # Step 1b: Patch settings.json with model, effort, and thinking preferences.
   # Merges into existing settings (copied from host in step 1) or creates fresh.
   # Build a jq filter dynamically — model/effort values are simple strings (no special chars).
@@ -1667,8 +1700,12 @@ cmd_new() {
   # In container mode, secrets are passed via --remote-env at container start,
   # so env_prefix is not needed (docker exec doesn't inherit parent env anyway).
   local env_prefix=""
-  if [ "$container" != true ] && [ -f "$SECRETS_FILE" ]; then
-    env_prefix="set -a && source $SECRETS_FILE && set +a && "
+  if [ "$container" != true ]; then
+    env_prefix=$(build_env_prefix)
+  fi
+
+  if [[ "$agent" == *claude* ]]; then
+    validate_claude_auth || true
   fi
 
   # Create tmux session with agent(s)
@@ -3338,11 +3375,15 @@ cmd_doctor() {
 
   # Claude Code
   if command -v claude &>/dev/null; then
-    if claude auth status &>/dev/null 2>&1; then
-      echo -e "  ${GREEN}✓${NC} Claude Code — authenticated"
+    local has_claude_auth=false
+    if [ -f "$SECRETS_FILE" ]; then
+      grep -qE '^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)=' "$SECRETS_FILE" 2>/dev/null && has_claude_auth=true
+    fi
+    if [ "$has_claude_auth" = true ]; then
+      echo -e "  ${GREEN}✓${NC} Claude Code — authenticated (via secrets.env)"
       ok=$((ok + 1))
     else
-      echo -e "  ${YELLOW}○${NC} Claude Code — not authenticated (run: claude login)"
+      echo -e "  ${YELLOW}○${NC} Claude Code — no auth in secrets.env (add CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY)"
       warn_count=$((warn_count + 1))
     fi
   else
@@ -3450,8 +3491,12 @@ cmd_restart() {
 
   # Source secrets — skip in container mode (secrets passed via --remote-env)
   local env_prefix=""
-  if [ -z "$container_id" ] && [ -f "$SECRETS_FILE" ]; then
-    env_prefix="set -a && source $SECRETS_FILE && set +a && "
+  if [ -z "$container_id" ]; then
+    env_prefix=$(build_env_prefix)
+  fi
+
+  if [[ "$agents" == *claude* ]]; then
+    validate_claude_auth || true
   fi
 
   # Parse agents list and determine primary agent
@@ -4103,8 +4148,12 @@ cmd_agent() {
 
       # Source secrets — skip in container mode (secrets passed via --remote-env)
       local env_prefix=""
-      if [ -z "$cid" ] && [ -f "$SECRETS_FILE" ]; then
-        env_prefix="set -a && source $SECRETS_FILE && set +a && "
+      if [ -z "$cid" ]; then
+        env_prefix=$(build_env_prefix)
+      fi
+
+      if [[ "$agent_type" == *claude* ]]; then
+        validate_claude_auth || true
       fi
 
       # Resolve yolo from project config
@@ -5101,10 +5150,13 @@ cmd_ask() {
 
   # --print mode: run agent non-interactively, print result, clean up
   if [ "$print_mode" = true ] && [ -n "$prompt" ]; then
+    if [[ "$agent" == *claude* ]]; then
+      validate_claude_auth || true
+    fi
     info "Asking Claude: $prompt"
     echo ""
     local env_prefix=""
-    [ -f "$SECRETS_FILE" ] && env_prefix="set -a && source $SECRETS_FILE && set +a && "
+    env_prefix=$(build_env_prefix)
     cd "$tmp_path"
     eval "${env_prefix}claude --print \"\$prompt\"" || true
     echo ""
@@ -5154,8 +5206,10 @@ cmd_ask() {
 
   # Source secrets
   local env_prefix=""
-  if [ -f "$SECRETS_FILE" ]; then
-    env_prefix="set -a && source $SECRETS_FILE && set +a && "
+  env_prefix=$(build_env_prefix)
+
+  if [[ "$agent" == *claude* ]]; then
+    validate_claude_auth || true
   fi
 
   # Build agent command
@@ -5291,8 +5345,10 @@ cmd_ghost() {
 
   # Source secrets
   local env_prefix=""
-  if [ -f "$SECRETS_FILE" ]; then
-    env_prefix="set -a && source $SECRETS_FILE && set +a && "
+  env_prefix=$(build_env_prefix)
+
+  if [[ "$agent" == *claude* ]]; then
+    validate_claude_auth || true
   fi
 
   # Build agent command
@@ -5447,9 +5503,9 @@ cmd_review() {
 
   # Source secrets
   local env_prefix=""
-  if [ -f "$SECRETS_FILE" ]; then
-    env_prefix="set -a && source $SECRETS_FILE && set +a && "
-  fi
+  env_prefix=$(build_env_prefix)
+
+  validate_claude_auth || true
 
   # Build agent command
   local claude_flags=""

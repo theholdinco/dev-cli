@@ -425,8 +425,9 @@ if [ ! -f ~/.config/dev-cli/secrets.env ]; then
 # API Keys — chmod 600 this file
 # These are sourced by the dev CLI when launching agents
 
-# Claude Code (Anthropic)
-# ANTHROPIC_API_KEY=sk-ant-...
+# Claude Code — pick ONE (not both):
+# CLAUDE_CODE_OAUTH_TOKEN=    # Pro/Max subscription (run: claude setup-token)
+# ANTHROPIC_API_KEY=sk-ant-... # API key (pay-per-token billing)
 
 # Codex (OpenAI)
 # OPENAI_API_KEY=sk-...
