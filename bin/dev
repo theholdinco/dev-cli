@@ -859,35 +859,9 @@ build_container_exec_cmd() {
   echo "docker exec -it --user node \"$container_id\""
 }
 
-# Restore git worktree paths from container paths back to host paths.
-# Called before container removal so the host worktree remains valid.
-restore_worktree_git_paths() {
-  local session_name="$1"
-  local worktree_path project wt_name bare_dir
-  worktree_path=$(get_session_field "$session_name" "path") || return 0
-  project=$(get_session_field "$session_name" "project") || return 0
-  [ -z "$worktree_path" ] || [ -z "$project" ] && return 0
-
-  wt_name=$(basename "$worktree_path")
-  bare_dir="$PROJECTS_DIR/$project"
-  local wt_meta="$bare_dir/worktrees/$wt_name"
-
-  # Restore .git file → original host path
-  if [ -f "$worktree_path/.git" ]; then
-    echo "gitdir: $wt_meta" > "$worktree_path/.git"
-  fi
-  # Restore bare repo reverse pointer → original host worktree path
-  if [ -f "$wt_meta/gitdir" ]; then
-    echo "$worktree_path" > "$wt_meta/gitdir"
-  fi
-}
-
 # Stop and remove a session's devcontainer.
 stop_devcontainer() {
   local session_name="$1" container_id="$2"
-
-  # Restore host git paths before killing the container
-  restore_worktree_git_paths "$session_name"
 
   if [ -n "$container_id" ]; then
     info "Stopping devcontainer ${container_id:0:12}..."
