@@ -599,14 +599,20 @@ ensure_devcontainer_json() {
 
   mkdir -p "$dc_dir"
 
-  # Build containerEnv as a jq object (safe from JSON injection)
+  # Build containerEnv as a jq object (safe from JSON injection).
+  # ANTHROPIC_MODEL and CLAUDE_CODE_EFFORT_LEVEL are set here as env vars because
+  # they're the most reliable way to configure Claude Code — env vars override
+  # settings.json and can't be broken by postCreateCommand failures.
   local container_env_json
   container_env_json=$(jq -n \
     --arg proj "${DEV_PROJECT:-$project}" \
     --arg branch "${DEV_BRANCH:-}" \
     --arg fport "${DEV_FRONTEND_PORT:-}" \
     --arg bport "${DEV_BACKEND_PORT:-}" \
-    '{DEV_PROJECT: $proj, DEV_BRANCH: $branch}
+    --arg model "$claude_model" \
+    --arg effort "$claude_effort" \
+    '{DEV_PROJECT: $proj, DEV_BRANCH: $branch, CLAUDE_CODE_EFFORT_LEVEL: $effort, DISABLE_AUTOUPDATER: "1"}
+     + (if $model != "" then {ANTHROPIC_MODEL: $model} else {} end)
      + (if $fport != "" then {DEV_FRONTEND_PORT: $fport} else {} end)
      + (if $bport != "" then {DEV_BACKEND_PORT: $bport} else {} end)')
 
