@@ -649,6 +649,20 @@ ensure_devcontainer_json() {
      + (if $fport != "" then {DEV_FRONTEND_PORT: $fport} else {} end)
      + (if $bport != "" then {DEV_BACKEND_PORT: $bport} else {} end)')
 
+  # Add API keys from secrets.env into containerEnv so they're visible to docker exec
+  if [ -f "$SECRETS_FILE" ]; then
+    for api_key_name in "${CONTAINER_API_KEYS[@]}"; do
+      local api_key_line
+      api_key_line=$(grep -E "^${api_key_name}=" "$SECRETS_FILE" 2>/dev/null | head -1)
+      if [ -n "$api_key_line" ]; then
+        local val="${api_key_line#*=}"
+        val="${val#\"}" ; val="${val%\"}"
+        val="${val#\'}" ; val="${val%\'}"
+        container_env_json=$(echo "$container_env_json" | jq --arg k "$api_key_name" --arg v "$val" '. + {($k): $v}')
+      fi
+    done
+  fi
+
   # If --env requested, build remoteEnv with localEnv references for secrets
   local remote_env_json="{}"
   if [ "$pass_env" = true ] && [ -f "$SECRETS_FILE" ]; then
@@ -767,41 +781,25 @@ start_devcontainer() {
   local dc_args=("devcontainer" "up" "--workspace-folder" "$worktree_path"
                  "--id-label" "dev-cli.session=${session_name}")
 
-  # Always pass model API keys from secrets.env into the container.
-  # Without these, Claude Code / Codex can't authenticate.
-  local -A passed_keys=()
-  if [ -f "$SECRETS_FILE" ]; then
-    for api_key_name in "${CONTAINER_API_KEYS[@]}"; do
-      local api_key_value
-      api_key_value=$(grep -E "^${api_key_name}=" "$SECRETS_FILE" 2>/dev/null | head -1)
-      if [ -n "$api_key_value" ]; then
-        local val="${api_key_value#*=}"
-        # Strip surrounding quotes
-        val="${val#\"}" ; val="${val%\"}"
-        val="${val#\'}" ; val="${val%\'}"
-        dc_args+=("--remote-env" "${api_key_name}=${val}")
-        passed_keys["$api_key_name"]=1
-      fi
-    done
-  fi
-
-  # If --env, also pass all remaining secrets.env vars via --remote-env
+  # If --env, pass non-API-key secrets via --remote-env
+  # (API keys are already baked into containerEnv by ensure_devcontainer_json)
   if [ "$pass_env" = true ] && [ -f "$SECRETS_FILE" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
-      # Skip comments and blank lines
       [[ "$line" =~ ^[[:space:]]*# ]] && continue
       [[ -z "${line// /}" ]] && continue
-      # Split on first = only
       local key="${line%%=*}"
       local value="${line#*=}"
-      key="${key#"${key%%[![:space:]]*}"}"  # trim leading whitespace
-      key="${key%"${key##*[![:space:]]}"}"  # trim trailing whitespace
+      key="${key#"${key%%[![:space:]]*}"}"
+      key="${key%"${key##*[![:space:]]}"}"
       [ -z "$key" ] && continue
-      # Skip if already passed as an API key
-      [ -n "${passed_keys[$key]+x}" ] && continue
-      # Strip surrounding quotes from value
-      value="${value#"${value%%[![:space:]]*}"}"  # trim leading whitespace
-      value="${value%"${value##*[![:space:]]}"}"  # trim trailing whitespace
+      # Skip keys already in containerEnv
+      local is_api_key=false
+      for api_key_name in "${CONTAINER_API_KEYS[@]}"; do
+        [ "$key" = "$api_key_name" ] && { is_api_key=true; break; }
+      done
+      [ "$is_api_key" = true ] && continue
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
       value="${value#\"}" ; value="${value%\"}"
       value="${value#\'}" ; value="${value%\'}"
       dc_args+=("--remote-env" "${key}=${value}")
