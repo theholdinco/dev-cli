@@ -1216,7 +1216,7 @@ cmd_new() {
   # Source secrets
   local env_prefix=""
   if [ -f "$SECRETS_FILE" ]; then
-    env_prefix="source $SECRETS_FILE && "
+    env_prefix="set -a && source $SECRETS_FILE && set +a && "
   fi
 
   # Create tmux session with agent(s)
@@ -2952,7 +2952,7 @@ cmd_restart() {
   # Source secrets
   local env_prefix=""
   if [ -f "$SECRETS_FILE" ]; then
-    env_prefix="source $SECRETS_FILE && "
+    env_prefix="set -a && source $SECRETS_FILE && set +a && "
   fi
 
   # Parse agents list and determine primary agent
@@ -3530,7 +3530,7 @@ cmd_agent() {
       # Source secrets
       local env_prefix=""
       if [ -f "$SECRETS_FILE" ]; then
-        env_prefix="source $SECRETS_FILE && "
+        env_prefix="set -a && source $SECRETS_FILE && set +a && "
       fi
 
       # Resolve yolo from project config
@@ -4529,7 +4529,7 @@ cmd_ask() {
     info "Asking Claude: $prompt"
     echo ""
     local env_prefix=""
-    [ -f "$SECRETS_FILE" ] && env_prefix="source $SECRETS_FILE && "
+    [ -f "$SECRETS_FILE" ] && env_prefix="set -a && source $SECRETS_FILE && set +a && "
     cd "$tmp_path"
     eval "${env_prefix}claude --print \"\$prompt\"" || true
     echo ""
@@ -4580,7 +4580,7 @@ cmd_ask() {
   # Source secrets
   local env_prefix=""
   if [ -f "$SECRETS_FILE" ]; then
-    env_prefix="source $SECRETS_FILE && "
+    env_prefix="set -a && source $SECRETS_FILE && set +a && "
   fi
 
   # Build agent command
@@ -4717,7 +4717,7 @@ cmd_ghost() {
   # Source secrets
   local env_prefix=""
   if [ -f "$SECRETS_FILE" ]; then
-    env_prefix="source $SECRETS_FILE && "
+    env_prefix="set -a && source $SECRETS_FILE && set +a && "
   fi
 
   # Build agent command
@@ -4873,7 +4873,7 @@ cmd_review() {
   # Source secrets
   local env_prefix=""
   if [ -f "$SECRETS_FILE" ]; then
-    env_prefix="source $SECRETS_FILE && "
+    env_prefix="set -a && source $SECRETS_FILE && set +a && "
   fi
 
   # Build agent command
