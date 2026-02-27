@@ -857,11 +857,28 @@ get_container_workspace() {
 }
 
 # Build the shell command for running an agent, container-aware.
-# Usage: agent_cmd=$(build_agent_cmd <agent_type> <worktree_path> [container_id] [claude_flags] [prompt_arg])
+# Usage: agent_cmd=$(build_agent_cmd <agent_type> <worktree_path> [container_id] [claude_flags] [prompt_arg] [headless])
 # Returns a shell string suitable for tmux new-window / new-session.
+# When headless=true, uses `claude -p` for non-interactive execution (skips all onboarding).
+# In headless mode, output streams to the tmux pane so the user can still `dev attach` to watch.
 build_agent_cmd() {
   local agent_type="$1" worktree_path="$2"
-  local container_id="${3:-}" claude_flags="${4:-}" prompt_arg="${5:-}"
+  local container_id="${3:-}" claude_flags="${4:-}" prompt_arg="${5:-}" headless="${6:-false}"
+
+  # In headless mode, claude -p reads the prompt and works non-interactively.
+  # --dangerously-skip-permissions is safe here because the container is sandboxed.
+  # The trailing "; echo ... && bash" keeps the tmux window open after completion.
+  local claude_bin="claude"
+  local done_suffix=""
+  if [ "$headless" = true ] && [ "$agent_type" = "claude" ]; then
+    claude_bin="claude -p"
+    # --dangerously-skip-permissions is added via claude_flags by the caller when yolo=true.
+    # For headless container mode, always ensure it's present (container is the sandbox).
+    if [[ ! "$claude_flags" =~ dangerously-skip-permissions ]]; then
+      claude_flags="${claude_flags} --dangerously-skip-permissions"
+    fi
+    done_suffix="; echo ''; echo 'Agent finished. Session kept open for inspection.'; exec bash"
+  fi
 
   if [ -n "$container_id" ]; then
     local prefix workspace
@@ -870,15 +887,15 @@ build_agent_cmd() {
     # Use double quotes for bash -lc so inner content can contain single quotes
     # (e.g., prompts with apostrophes). Workspace paths are always /workspaces/<name>.
     case "$agent_type" in
-      claude) echo "$prefix bash -lc \"cd $workspace && claude${claude_flags}${prompt_arg}\"" ;;
-      codex)  echo "$prefix bash -lc \"cd $workspace && codex${prompt_arg}\"" ;;
+      claude) echo "$prefix bash -lc \"cd $workspace && ${claude_bin}${claude_flags}${prompt_arg}${done_suffix}\"" ;;
+      codex)  echo "$prefix bash -lc \"cd $workspace && codex${prompt_arg}${done_suffix}\"" ;;
       none)   echo "$prefix bash -lc \"cd $workspace && echo Ready. && bash\"" ;;
       *)      die "Unknown agent: $agent_type. Use claude, codex, or none." ;;
     esac
   else
     case "$agent_type" in
-      claude) echo "cd $worktree_path && claude${claude_flags}${prompt_arg}" ;;
-      codex)  echo "cd $worktree_path && codex${prompt_arg}" ;;
+      claude) echo "cd $worktree_path && ${claude_bin}${claude_flags}${prompt_arg}${done_suffix}" ;;
+      codex)  echo "cd $worktree_path && codex${prompt_arg}${done_suffix}" ;;
       none)   echo "cd $worktree_path && echo 'Ready. No agent started.' && bash" ;;
       *)      die "Unknown agent: $agent_type. Use claude, codex, or none." ;;
     esac
@@ -1356,7 +1373,7 @@ PCONF
 }
 
 cmd_new() {
-  local project="${2:-}" branch="${3:-}" agent="" agents_flag="" run_cmd="" yolo=false attach=false from_branch="" private=false container=false container_env=false initial_prompt=""
+  local project="${2:-}" branch="${3:-}" agent="" agents_flag="" run_cmd="" yolo=false attach=false from_branch="" private=false container=false container_env=false initial_prompt="" headless=false
   shift 2 || true
 
   # Parse options
@@ -1376,6 +1393,7 @@ cmd_new() {
       --attach) attach=true; shift ;;
       --private) private=true; shift ;;
       --container) container=true; shift ;;
+      --headless) headless=true; shift ;;
       --env) container_env=true; shift ;;
       *) shift ;;
     esac
@@ -1434,13 +1452,36 @@ cmd_new() {
   # Default effort to "high" if not set
   [ -z "$claude_effort" ] && claude_effort="high"
 
+  # Auto-enable headless when container + prompt (fire-and-forget use case).
+  # The user provided a prompt, so they expect the agent to just work — no interaction needed.
+  if [ "$container" = true ] && [ -n "$initial_prompt" ] && [ "$headless" != true ]; then
+    headless=true
+    info "Using headless mode (prompt provided with --container)"
+  fi
+
+  # Headless requires a prompt — the agent needs to know what to do
+  if [ "$headless" = true ] && [ -z "$initial_prompt" ]; then
+    die "Headless mode requires --prompt. The agent needs a task to work on."
+  fi
+
+  # Headless implies container — it's the sandbox that makes headless safe
+  if [ "$headless" = true ] && [ "$container" != true ]; then
+    container=true
+    info "Headless mode implies --container (agent needs a sandbox)"
+  fi
+
+  # Headless implies yolo — the container IS the sandbox
+  if [ "$headless" = true ] && [ "$yolo" != true ]; then
+    yolo=true
+  fi
+
   # Container mode requires devcontainer CLI
   if [ "$container" = true ] && ! command -v devcontainer &>/dev/null; then
     die "devcontainer CLI not found. Install it with: npm install -g @devcontainers/cli"
   fi
 
-  [ -z "$project" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--container] [--env] [--private] [--prompt \"...\"]"
-  [ -z "$branch" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--container] [--env] [--private] [--prompt \"...\"]"
+  [ -z "$project" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--container] [--headless] [--env] [--private] [--prompt \"...\"]"
+  [ -z "$branch" ] && die "Usage: dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--container] [--headless] [--env] [--private] [--prompt \"...\"]"
 
   local bare_dir="$PROJECTS_DIR/$project"
   local wt_dir="$PROJECTS_DIR/${project}-worktrees"
@@ -1613,7 +1654,9 @@ cmd_new() {
       jq --arg name "$name" \
          --arg cid "$container_id" \
          --arg cenv "$container_env" \
-         '.[$name].container_id = $cid | .[$name].use_container = true | .[$name].container_env = ($cenv == "true")' \
+         --argjson hl "$([ "$headless" = true ] && echo true || echo false)" \
+         --arg prompt "$initial_prompt" \
+         '.[$name].container_id = $cid | .[$name].use_container = true | .[$name].container_env = ($cenv == "true") | .[$name].headless = $hl | (if $prompt != "" then .[$name].headless_prompt = $prompt else . end)' \
          "$PORT_REGISTRY" > "$tmp"
       mv -f "$tmp" "$PORT_REGISTRY"
       fix_registry_perms
@@ -1658,7 +1701,7 @@ cmd_new() {
   fi
 
   local agent_cmd
-  agent_cmd=$(build_agent_cmd "$primary_agent" "$worktree_path" "$container_id" "$claude_flags" "$prompt_arg")
+  agent_cmd=$(build_agent_cmd "$primary_agent" "$worktree_path" "$container_id" "$claude_flags" "$prompt_arg" "$headless")
 
   # Set port env vars on tmux session so all windows/panes inherit them.
   local ip
@@ -1694,7 +1737,9 @@ cmd_new() {
   echo -e "  ${BOLD}Branch:${NC}   $branch"
   echo -e "  ${BOLD}Path:${NC}     $worktree_path"
   if [ "$container" = true ]; then
-    echo -e "  ${BOLD}Container:${NC} ${container_id:0:12} (devcontainer)"
+    local mode_label="interactive"
+    [ "$headless" = true ] && mode_label="headless"
+    echo -e "  ${BOLD}Container:${NC} ${container_id:0:12} ($mode_label)"
   fi
   if [ "$wt_frontend" != "null" ]; then
     echo -e "  ${BOLD}Frontend:${NC} http://$ip:$wt_frontend"
@@ -1708,6 +1753,17 @@ cmd_new() {
   win_names=$(get_tmux_windows "$project" | jq -r '.[].name' | paste -sd' | ' -)
   echo -e "  ${DIM}Windows:   $win_names${NC}"
   echo ""
+
+  if [ "$container" = true ] && [ "$headless" = true ]; then
+    echo -e "  ${GREEN}Headless mode:${NC} Agent is working inside the container."
+    echo -e "  ${DIM}The agent will complete the task and exit. Watch with: dev attach $name${NC}"
+    echo ""
+  elif [ "$container" = true ]; then
+    warn "Interactive container mode is experimental."
+    echo -e "  ${DIM}You may see onboarding prompts from Claude Code on first launch.${NC}"
+    echo -e "  ${DIM}For fully automated use, add --prompt to enable headless mode.${NC}"
+    echo ""
+  fi
 
   if [ "$attach" = true ]; then
     tmux attach-session -t "$name"
@@ -3452,9 +3508,28 @@ cmd_restart() {
     fi
   fi
 
+  # Restore headless mode if the session was created with it
+  local session_headless prompt_arg=""
+  session_headless=$(get_session_field "$match" "headless")
+  if [ "$session_headless" = "true" ]; then
+    local stored_prompt
+    stored_prompt=$(get_session_field "$match" "headless_prompt")
+    if [ -n "$stored_prompt" ] && [ "$stored_prompt" != "null" ]; then
+      local escaped_prompt="${stored_prompt//\\/\\\\}"
+      escaped_prompt="${escaped_prompt//\$/\\\$}"
+      escaped_prompt="${escaped_prompt//\`/\\\`}"
+      escaped_prompt="${escaped_prompt//\"/\\\"}"
+      prompt_arg=" \"${escaped_prompt}\""
+      info "Restarting in headless mode with stored prompt"
+    else
+      warn "Headless session but no stored prompt — restarting in interactive mode"
+      session_headless="false"
+    fi
+  fi
+
   # Recreate tmux session with primary agent
   local agent_cmd
-  agent_cmd=$(build_agent_cmd "$primary_agent" "$worktree_path" "$container_id" "$claude_flags")
+  agent_cmd=$(build_agent_cmd "$primary_agent" "$worktree_path" "$container_id" "$claude_flags" "$prompt_arg" "$session_headless")
 
   local ip
   ip=$(get_ip)
@@ -5530,7 +5605,7 @@ cmd_help() {
     dev help                                Show this help
 
   SESSIONS
-    dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--run "<cmd>"] [--private] [--container] [--env]
+    dev new <project> <branch> [--from <base>] [--agent claude|codex|none] [--agents claude,codex] [--yolo] [--attach] [--run "<cmd>"] [--private] [--container] [--headless] [--env] [--prompt "..."]
                                             Create worktree + start agent(s)
                                             --from base the new branch off a specific branch (instead of main)
                                             --agents starts multiple agents (comma-separated)
@@ -5538,7 +5613,9 @@ cmd_help() {
                                             --attach auto-attach to the session after creation
                                             --run auto-starts a command in the server window
                                             --private hide session from other users' listings
-                                            --container run agent inside a devcontainer (sandboxed)
+                                            --container run agent inside a devcontainer (experimental in interactive mode)
+                                            --headless run non-interactively with claude -p (requires --prompt)
+                                            --prompt pass initial prompt to agent (auto-enables headless with --container)
                                             --env pass host secrets.env into the container (only with --container)
     dev ls                                  List your active sessions
     dev ls --all                              List all users' sessions
@@ -5669,8 +5746,19 @@ cmd_help() {
     dev services logs [web|bot|task-runner]  Follow service logs
 
   DEVCONTAINER (sandboxed agent sessions)
-    --container                             Run the agent inside a devcontainer
+    --container                             Run agent inside a devcontainer
+    --headless                              Non-interactive mode (uses claude -p, skips all onboarding)
+    --prompt "..."                          Pass task to agent (auto-enables headless with --container)
     --env                                   Copy secrets.env vars into the container
+
+    Headless mode (recommended): --container --prompt "task description"
+      Agent works non-interactively inside the container. No onboarding prompts.
+      Watch progress with: dev attach <session>
+
+    Interactive mode (experimental): --container (without --prompt)
+      You interact with Claude directly inside the container.
+      May show onboarding prompts on first launch.
+
     Project config: "use_container": true, "container_env": true
                     "claude_model": "opus", "claude_effort": "high"
     Uses existing .devcontainer/devcontainer.json if present, or generates one.
@@ -5694,8 +5782,9 @@ cmd_help() {
     dev new klyra feat/trading-ui --agent claude
     dev new klyra feat/trading-ui --yolo
     dev new klyra fix/auth-bug --agents claude,codex
-    dev new klyra refactor/api --container --yolo  # sandboxed agent, safe to skip perms
-    dev new klyra fix/db --container --env --yolo  # container + host secrets passed in
+    dev new klyra refactor/api --container --prompt "Refactor the API layer"  # headless, fire-and-forget
+    dev new klyra fix/db --container --env --prompt "Fix the DB connection bug"  # headless + secrets
+    dev new klyra feat/ui --container              # interactive container (experimental)
     dev pr-start klyra 42                         # start session from PR #42
     dev pr-start klyra 42 --yolo --attach        # start from PR, skip perms, attach
     dev pr-start klyra https://github.com/org/klyra/pull/42  # start from PR URL
