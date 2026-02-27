@@ -587,6 +587,7 @@ ENVEOF
 # Respects existing devcontainer configs committed to the project repo.
 ensure_devcontainer_json() {
   local worktree_path="$1" project="$2" pass_env="$3"
+  local claude_model="${4:-}" claude_effort="${5:-}"
   local dc_dir="$worktree_path/.devcontainer"
   local dc_file="$dc_dir/devcontainer.json"
 
@@ -651,13 +652,17 @@ ensure_devcontainer_json() {
 
   # Step 1: Copy the host's ~/.claude/ directory (credentials, settings, plugins)
   local post_create_cmd="if [ -d /tmp/.host-claude ]; then mkdir -p ~/.claude && cp -a /tmp/.host-claude/. ~/.claude/ && chmod 600 ~/.claude/.credentials.json 2>/dev/null; fi"
-  # Step 1b: Ensure settings.json has thinking enabled (skips the thinking mode onboarding prompt).
-  # Uses jq if available, otherwise writes a minimal settings file.
-  post_create_cmd="$post_create_cmd ; if [ -f ~/.claude/settings.json ] && command -v jq >/dev/null; then jq '.alwaysThinkingEnabled = true | .skipDangerousModePermissionPrompt = true' ~/.claude/settings.json > ~/.claude/settings.json.tmp && mv ~/.claude/settings.json.tmp ~/.claude/settings.json; elif command -v jq >/dev/null; then jq -n '{alwaysThinkingEnabled:true,skipDangerousModePermissionPrompt:true}' > ~/.claude/settings.json; fi"
-  # Step 2: Mark onboarding complete and trust the container workspace.
-  # This is the critical step — without hasCompletedOnboarding, Claude shows the welcome flow.
-  # installMethod + bypassPermissionsModeAccepted prevent additional prompts.
-  post_create_cmd="$post_create_cmd ; echo '{\"hasCompletedOnboarding\":true,\"installMethod\":\"native\",\"bypassPermissionsModeAccepted\":true,\"projects\":{\"$container_workspace\":{\"hasTrustDialogAccepted\":true,\"allowedTools\":[]}}}' > ~/.claude.json"
+  # Step 1b: Patch settings.json with model, effort, and thinking preferences.
+  # Merges into existing settings (copied from host in step 1) or creates fresh.
+  # Build a jq filter dynamically — model/effort values are simple strings (no special chars).
+  local settings_filter=".alwaysThinkingEnabled = true | .skipDangerousModePermissionPrompt = true"
+  [ -n "$claude_model" ] && settings_filter="$settings_filter | .model = \"$claude_model\""
+  [ -n "$claude_effort" ] && settings_filter="$settings_filter | .effortLevel = \"$claude_effort\""
+  # Apply filter to existing settings.json, or create from scratch using jq -n (same filter on empty object)
+  post_create_cmd="$post_create_cmd ; if command -v jq >/dev/null; then if [ -f ~/.claude/settings.json ]; then jq '$settings_filter' ~/.claude/settings.json > ~/.claude/settings.json.tmp && mv ~/.claude/settings.json.tmp ~/.claude/settings.json; else mkdir -p ~/.claude && jq -n '{} | $settings_filter' > ~/.claude/settings.json; fi; fi"
+  # Step 2: Mark ALL onboarding complete and trust the container workspace.
+  # Every onboarding prompt needs its own flag — missing any causes an interactive dialog.
+  post_create_cmd="$post_create_cmd ; echo '{\"hasCompletedOnboarding\":true,\"hasAcknowledgedCostThreshold\":true,\"shiftEnterKeyBindingInstalled\":true,\"installMethod\":\"native\",\"bypassPermissionsModeAccepted\":true,\"theme\":\"dark\",\"customApiKeyResponses\":{\"approved\":[],\"rejected\":[]},\"projects\":{\"$container_workspace\":{\"hasTrustDialogAccepted\":true,\"hasCompletedProjectOnboarding\":true,\"allowedTools\":[]}}}' > ~/.claude.json"
   # Step 3: Copy SSH keys from readonly mount
   post_create_cmd="$post_create_cmd ; if [ -d /tmp/.host-ssh ]; then cp -r /tmp/.host-ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/* 2>/dev/null; fi"
   # Step 4: Install Claude Code globally
@@ -1414,6 +1419,15 @@ cmd_new() {
     container_env=false
   fi
 
+  # Resolve container Claude preferences from project config
+  local claude_model="" claude_effort=""
+  if [ "$container" = true ] && [ -n "$project" ] && [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
+    claude_model=$(jq -r '.claude_model // empty' "$CONFIG_DIR/projects/${project}.json" 2>/dev/null)
+    claude_effort=$(jq -r '.claude_effort // empty' "$CONFIG_DIR/projects/${project}.json" 2>/dev/null)
+  fi
+  # Default effort to "high" if not set
+  [ -z "$claude_effort" ] && claude_effort="high"
+
   # Container mode requires devcontainer CLI
   if [ "$container" = true ] && ! command -v devcontainer &>/dev/null; then
     die "devcontainer CLI not found. Install it with: npm install -g @devcontainers/cli"
@@ -1567,7 +1581,7 @@ cmd_new() {
 
   if [ "$container" = true ]; then
     # Generate devcontainer.json if the project doesn't have one
-    ensure_devcontainer_json "$worktree_path" "$project" "$container_env"
+    ensure_devcontainer_json "$worktree_path" "$project" "$container_env" "$claude_model" "$claude_effort"
 
     # Set up cleanup trap: if devcontainer start fails, remove orphaned worktree.
     # Use a string trap (not a function) so variable values are captured now,
@@ -3755,7 +3769,7 @@ cmd_config() {
           y|Y|yes) use_container=true ;;
         esac
 
-        local use_container_env=false
+        local use_container_env=false new_claude_model="" new_claude_effort=""
         if [ "$use_container" = true ]; then
           local default_container_env="n"
           [ "${cur_container_env:-false}" = "true" ] && default_container_env="y"
@@ -3763,6 +3777,16 @@ cmd_config() {
           case "${container_env_choice:-$default_container_env}" in
             y|Y|yes) use_container_env=true ;;
           esac
+
+          local cur_claude_model="" cur_claude_effort=""
+          if [ -f "$pconfig" ]; then
+            cur_claude_model=$(jq -r '.claude_model // empty' "$pconfig" 2>/dev/null)
+            cur_claude_effort=$(jq -r '.claude_effort // empty' "$pconfig" 2>/dev/null)
+          fi
+          read -rp "  Claude model (opus/sonnet/haiku) [${cur_claude_model:-opus}]: " new_claude_model
+          new_claude_model="${new_claude_model:-${cur_claude_model:-opus}}"
+          read -rp "  Claude effort level (high/medium/low) [${cur_claude_effort:-high}]: " new_claude_effort
+          new_claude_effort="${new_claude_effort:-${cur_claude_effort:-high}}"
         fi
 
         echo ""
@@ -3781,7 +3805,9 @@ cmd_config() {
           --argjson yolo "$skip_perms" \
           --argjson use_container "$use_container" \
           --argjson container_env "$use_container_env" \
-          '.pkg_manager = $pkg | .default_agent = $agent | .skip_permissions = $yolo | .use_container = $use_container | .container_env = $container_env | (if $run != "" then .run_cmd = $run else del(.run_cmd) end)' > "$tmp"
+          --arg claude_model "$new_claude_model" \
+          --arg claude_effort "$new_claude_effort" \
+          '.pkg_manager = $pkg | .default_agent = $agent | .skip_permissions = $yolo | .use_container = $use_container | .container_env = $container_env | (if $run != "" then .run_cmd = $run else del(.run_cmd) end) | (if $claude_model != "" then .claude_model = $claude_model else del(.claude_model) end) | (if $claude_effort != "" then .claude_effort = $claude_effort else del(.claude_effort) end)' > "$tmp"
 
         if [ -n "$win_input" ]; then
           local windows_json="["
@@ -5640,6 +5666,7 @@ cmd_help() {
     --container                             Run the agent inside a devcontainer
     --env                                   Copy secrets.env vars into the container
     Project config: "use_container": true, "container_env": true
+                    "claude_model": "opus", "claude_effort": "high"
     Uses existing .devcontainer/devcontainer.json if present, or generates one.
     Requires: npm install -g @devcontainers/cli
 
