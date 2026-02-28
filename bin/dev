@@ -722,7 +722,7 @@ ensure_devcontainer_json() {
   # Step 4: Install Claude Code and GitHub CLI globally
   post_create_cmd="$post_create_cmd ; npm install -g @anthropic-ai/claude-code"
   # Step 5: Install gh and restore host auth state (mirrors bootstrap.sh pattern)
-  post_create_cmd="$post_create_cmd ; (sudo mkdir -p -m 755 /etc/apt/keyrings && wget -nv -O /tmp/gh-keyring.gpg https://cli.github.com/packages/githubcli-archive-keyring.gpg && cat /tmp/gh-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && echo 'deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main' | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt-get update -qq && sudo apt-get install -y -qq gh) 2>/dev/null"
+  post_create_cmd="$post_create_cmd ; (sudo mkdir -p -m 755 /etc/apt/keyrings && wget -nv -O /tmp/gh-keyring.gpg https://cli.github.com/packages/githubcli-archive-keyring.gpg && cat /tmp/gh-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt-get update -qq && sudo apt-get install -y -qq gh) 2>/dev/null"
   post_create_cmd="$post_create_cmd ; if [ -d /tmp/.host-gh ]; then mkdir -p ~/.config/gh && cp -a /tmp/.host-gh/. ~/.config/gh/ && gh auth setup-git 2>/dev/null; fi"
   # Step 6: Fix git worktree paths (host absolute paths → container paths)
   local wt_name
