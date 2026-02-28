@@ -1743,12 +1743,19 @@ cmd_new() {
 
   local prompt_arg=""
   if [ -n "$initial_prompt" ]; then
-    # Escape shell metacharacters for safe embedding in the sh -c command
-    local escaped_prompt="${initial_prompt//\\/\\\\}"
-    escaped_prompt="${escaped_prompt//\$/\\\$}"
-    escaped_prompt="${escaped_prompt//\`/\\\`}"
-    escaped_prompt="${escaped_prompt//\"/\\\"}"
-    prompt_arg=" \"${escaped_prompt}\""
+    if [ -n "$container_id" ]; then
+      # Write prompt to file in worktree (bind-mounted into container).
+      # Avoids nested quoting: bash → docker exec → bash -lc → claude -p.
+      printf '%s' "$initial_prompt" > "$worktree_path/.dev-prompt"
+      local container_workspace="/workspaces/$(basename "$worktree_path")"
+      prompt_arg=" < $container_workspace/.dev-prompt"
+    else
+      local escaped_prompt="${initial_prompt//\\/\\\\}"
+      escaped_prompt="${escaped_prompt//\$/\\\$}"
+      escaped_prompt="${escaped_prompt//\`/\\\`}"
+      escaped_prompt="${escaped_prompt//\"/\\\"}"
+      prompt_arg=" \"${escaped_prompt}\""
+    fi
   fi
 
   local agent_cmd
@@ -3574,11 +3581,17 @@ cmd_restart() {
     local stored_prompt
     stored_prompt=$(get_session_field "$match" "headless_prompt")
     if [ -n "$stored_prompt" ] && [ "$stored_prompt" != "null" ]; then
-      local escaped_prompt="${stored_prompt//\\/\\\\}"
-      escaped_prompt="${escaped_prompt//\$/\\\$}"
-      escaped_prompt="${escaped_prompt//\`/\\\`}"
-      escaped_prompt="${escaped_prompt//\"/\\\"}"
-      prompt_arg=" \"${escaped_prompt}\""
+      if [ -n "$container_id" ]; then
+        printf '%s' "$stored_prompt" > "$worktree_path/.dev-prompt"
+        local container_workspace="/workspaces/$(basename "$worktree_path")"
+        prompt_arg=" < $container_workspace/.dev-prompt"
+      else
+        local escaped_prompt="${stored_prompt//\\/\\\\}"
+        escaped_prompt="${escaped_prompt//\$/\\\$}"
+        escaped_prompt="${escaped_prompt//\`/\\\`}"
+        escaped_prompt="${escaped_prompt//\"/\\\"}"
+        prompt_arg=" \"${escaped_prompt}\""
+      fi
       info "Restarting in headless mode with stored prompt"
     else
       warn "Headless session but no stored prompt — restarting in interactive mode"
