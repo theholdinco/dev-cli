@@ -62,7 +62,7 @@ _dev() {
       bot)      COMPREPLY=( $(compgen -W "setup start stop status" -- "$cur") ) ;;
       services) COMPREPLY=( $(compgen -W "install uninstall start stop restart status logs" -- "$cur") ) ;;
       notify)   COMPREPLY=( $(compgen -W "setup status test delay" -- "$cur") ) ;;
-      task)     COMPREPLY=( $(compgen -W "add ls rm prune run watch log" -- "$cur") ) ;;
+      task)     COMPREPLY=( $(compgen -W "add import ls rm prune run watch log" -- "$cur") ) ;;
       agent)    COMPREPLY=( $(compgen -W "add remove list" -- "$cur") ) ;;
       config)   COMPREPLY=( $(compgen -W "show reset project" -- "$cur") ) ;;
     esac
@@ -120,6 +120,22 @@ _dev() {
     local projects
     projects=$(_dev_projects)
     [ -n "$projects" ] && COMPREPLY=( $(compgen -W "$projects" -- "$cur") )
+    return 0
+  fi
+
+  # task import <file> [flags] — complete flags after the file arg
+  if [ "$cmd" = "task" ] && [ "${COMP_WORDS[2]:-}" = "import" ]; then
+    if [ "$prev" = "--project" ]; then
+      local projects
+      projects=$(_dev_projects)
+      [ -n "$projects" ] && COMPREPLY=( $(compgen -W "$projects" -- "$cur") )
+      return 0
+    fi
+    if [[ "$cur" == -* ]]; then
+      COMPREPLY=( $(compgen -W "--project --from --private --dry-run" -- "$cur") )
+      return 0
+    fi
+    # Default to file completion (handled by bash)
     return 0
   fi
 
