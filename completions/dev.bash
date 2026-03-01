@@ -132,7 +132,7 @@ _dev() {
       return 0
     fi
     if [[ "$cur" == -* ]]; then
-      COMPREPLY=( $(compgen -W "--project --from --private --dry-run" -- "$cur") )
+      COMPREPLY=( $(compgen -W "--project --from --private --plan --dry-run" -- "$cur") )
       return 0
     fi
     # Default to file completion (handled by bash)
