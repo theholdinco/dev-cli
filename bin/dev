@@ -1752,6 +1752,47 @@ cmd_kill() {
     return 0
   fi
 
+  # Scaffold sessions are standalone git repos (not worktrees from a bare repo)
+  if [ "$session_type" = "scaffold" ]; then
+    if [ -d "$worktree_path" ]; then
+      # Check for unpushed commits
+      local has_remote=false
+      cd "$worktree_path"
+      git remote get-url origin &>/dev/null && has_remote=true
+
+      local commit_count
+      commit_count=$(git rev-list --count HEAD 2>/dev/null || echo "0")
+
+      if [ "$commit_count" -gt 0 ]; then
+        local unpushed=true
+        if [ "$has_remote" = true ]; then
+          local pushed
+          pushed=$(git rev-list --count origin/main..HEAD 2>/dev/null || echo "$commit_count")
+          [ "$pushed" -eq 0 ] && unpushed=false
+        fi
+
+        if [ "$unpushed" = true ] && [ "$force" != true ]; then
+          echo ""
+          warn "Scaffold '$project' has ${commit_count} commit(s) that may not be pushed."
+          echo -ne "  ${YELLOW}Delete project directory anyway? [y/N]:${NC} "
+          read -r confirm
+          [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || {
+            echo "  Cancelled. Directory kept at: $worktree_path"
+            unregister_session "$name"
+            return 0
+          }
+        fi
+      fi
+
+      rm -rf "$worktree_path"
+      log "Removed scaffold directory"
+    fi
+    unregister_session "$name"
+    log "Session '$name' fully cleaned up"
+    random_farewell
+    return 0
+  fi
+
   local bare_dir="$PROJECTS_DIR/$project"
 
   # Stop Supabase if running in this worktree
@@ -4525,6 +4566,168 @@ TASKEOF
 
       log "Task #$id approved — restarted Claude with implementation prompt"
       ;;
+    import)
+      local file="" import_project_default="" import_from="" import_private=false dry_run=false
+      shift 2  # skip "task import"
+
+      while [[ $# -gt 0 ]]; do
+        case "${1:-}" in
+          --from) import_from="${2:-}"; shift 2 ;;
+          --from=*) import_from="${1#*=}"; shift ;;
+          --private) import_private=true; shift ;;
+          --dry-run) dry_run=true; shift ;;
+          --project) import_project_default="${2:-}"; shift 2 ;;
+          --project=*) import_project_default="${1#*=}"; shift ;;
+          *)
+            if [ -z "$file" ]; then
+              file="$1"
+            fi
+            shift
+            ;;
+        esac
+      done
+
+      [ -n "$file" ] || die "Usage: dev task import <file.csv> [--project <default-project>] [--from <base>] [--private] [--dry-run]"
+      [ -f "$file" ] || die "File not found: $file"
+
+      local count=0 errors=0 line_num=0
+      local first_line=true
+
+      while IFS= read -r line || [ -n "$line" ]; do
+        line_num=$((line_num + 1))
+
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+
+        # Detect and skip header row (first non-empty, non-comment line starting with "project")
+        if [ "$first_line" = true ]; then
+          first_line=false
+          if echo "$line" | grep -qiE '^[[:space:]]*"?project"?[[:space:]]*,'; then
+            continue
+          fi
+        fi
+
+        # Parse CSV fields — handle optional quoting
+        local fields=()
+        local current="" in_quotes=false
+        local i
+        for (( i=0; i<${#line}; i++ )); do
+          local char="${line:$i:1}"
+          if [ "$char" = '"' ]; then
+            if [ "$in_quotes" = true ]; then
+              # Check for escaped quote (double-quote)
+              if [ "${line:$((i+1)):1}" = '"' ]; then
+                current+="$char"
+                i=$((i + 1))
+              else
+                in_quotes=false
+              fi
+            else
+              in_quotes=true
+            fi
+          elif [ "$char" = ',' ] && [ "$in_quotes" = false ]; then
+            fields+=("$current")
+            current=""
+          else
+            current+="$char"
+          fi
+        done
+        fields+=("$current")
+
+        # Trim whitespace from fields
+        local trimmed_fields=()
+        for f in "${fields[@]}"; do
+          f="${f#"${f%%[![:space:]]*}"}"  # ltrim
+          f="${f%"${f##*[![:space:]]}"}"  # rtrim
+          trimmed_fields+=("$f")
+        done
+
+        local csv_project="${trimmed_fields[0]:-}"
+        local csv_description="${trimmed_fields[1]:-}"
+        local csv_branch="${trimmed_fields[2]:-}"
+        local csv_from="${trimmed_fields[3]:-}"
+        local csv_private="${trimmed_fields[4]:-}"
+
+        # Apply defaults
+        [ -z "$csv_project" ] && csv_project="$import_project_default"
+        [ -z "$csv_from" ] && csv_from="$import_from"
+        if [ "$import_private" = true ] && [ -z "$csv_private" ]; then
+          csv_private="true"
+        fi
+
+        # Validate required fields
+        if [ -z "$csv_project" ]; then
+          warn "Line $line_num: missing project — skipping"
+          errors=$((errors + 1))
+          continue
+        fi
+        if [ -z "$csv_description" ]; then
+          warn "Line $line_num: missing description — skipping"
+          errors=$((errors + 1))
+          continue
+        fi
+
+        # Validate project exists
+        if [ ! -f "$CONFIG_DIR/projects/${csv_project}.json" ]; then
+          warn "Line $line_num: project '$csv_project' not found — skipping"
+          errors=$((errors + 1))
+          continue
+        fi
+
+        # Auto-generate branch if not provided
+        if [ -z "$csv_branch" ]; then
+          local id_for_branch
+          id_for_branch=$(jq -r '.next_id' "$TASK_REGISTRY")
+          csv_branch="task-${id_for_branch}"
+        fi
+
+        # Normalize private field
+        local is_private=false
+        [[ "$csv_private" =~ ^(true|yes|1)$ ]] && is_private=true
+
+        if [ "$dry_run" = true ]; then
+          echo -e "  ${DIM}[dry-run]${NC} $csv_project/$csv_branch — $csv_description"
+          count=$((count + 1))
+          continue
+        fi
+
+        # Add the task
+        local id now tmp
+        id=$(jq -r '.next_id' "$TASK_REGISTRY")
+        now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+        tmp="$TASK_REGISTRY.tmp.$$"
+
+        jq --arg id "$id" --arg proj "$csv_project" --arg br "$csv_branch" \
+           --arg desc "$csv_description" --arg now "$now" \
+           --arg from "$csv_from" \
+           --argjson private "$is_private" \
+          '.tasks += [{
+            id: $id,
+            project: $proj,
+            branch: $br,
+            description: $desc,
+            from_branch: (if $from == "" then null else $from end),
+            private: $private,
+            status: "pending",
+            session: null,
+            pr_url: null,
+            created: $now,
+            started: null,
+            completed: null
+          }] | .next_id = (.next_id + 1)' "$TASK_REGISTRY" > "$tmp" && mv "$tmp" "$TASK_REGISTRY"
+
+        log "Task #$id added: $csv_project/$csv_branch — $csv_description"
+        count=$((count + 1))
+      done < "$file"
+
+      echo ""
+      if [ "$dry_run" = true ]; then
+        info "Dry run: $count task(s) would be imported ($errors skipped)"
+      else
+        log "Imported $count task(s) from $file"
+        [ "$errors" -gt 0 ] && warn "$errors line(s) skipped due to errors"
+      fi
+      ;;
     rm|remove)
       local id="${3:-}"
       [ -n "$id" ] || die "Usage: dev task rm <id>"
@@ -4559,11 +4762,13 @@ TASKEOF
       fi
       ;;
     *)
-      echo "Usage: dev task <add|ls|approve|rm|prune|run|watch|log>"
+      echo "Usage: dev task <add|import|ls|approve|rm|prune|run|watch|log>"
       echo ""
       echo "  add <project> [branch] \"desc\" [--from <base>] [--plan]"
       echo "                                 Add a task to the queue"
       echo "                                 --plan creates plan first, waits for approval"
+      echo "  import <file.csv> [--project <p>] [--from <base>] [--private] [--dry-run]"
+      echo "                                 Batch-import tasks from a CSV file"
       echo "  approve <id>                   Approve a plan-review task and start implementation"
       echo "  ls [--pending|--running|...]    List tasks (filter by status)"
       echo "  rm <id>                        Remove a task"
@@ -4875,6 +5080,206 @@ cmd_ghost() {
   echo ""
 }
 
+cmd_scaffold() {
+  local name="${2:-}" agent="claude" yolo=false attach=false prompt="" remote=""
+  shift || true
+  shift || true
+
+  # Parse options
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --agent) agent="${2:-claude}"; shift 2 ;;
+      --agent=*) agent="${1#*=}"; shift ;;
+      --yolo) yolo=true; shift ;;
+      --attach) attach=true; shift ;;
+      --remote) remote="${2:-}"; shift 2 ;;
+      --remote=*) remote="${1#*=}"; shift ;;
+      --prompt) prompt="${2:-}"; shift 2 ;;
+      --prompt=*) prompt="${1#*=}"; shift ;;
+      *)
+        if [ -z "$prompt" ]; then
+          prompt="$1"
+        else
+          prompt="$prompt $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [ -z "$name" ] && die "Usage: dev scaffold <name> [--agent claude|codex|none] [--yolo] [--attach] [--remote <git-url>] [--prompt \"...\"]"
+
+  # Sanitize name
+  name=$(echo "$name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+  [ -z "$name" ] && die "Invalid project name"
+
+  local session_name="${USER}-scaffold-${name}"
+  local scaffold_dir="$PROJECTS_DIR/$name"
+
+  # Validate
+  [ -z "$(get_session "$session_name")" ] || die "Session '$session_name' already exists."
+  [ -d "$scaffold_dir" ] && die "Directory '$scaffold_dir' already exists. Choose a different name or remove it."
+
+  # Create project directory and init git
+  mkdir -p "$scaffold_dir"
+  cd "$scaffold_dir"
+  git init --initial-branch=main
+  log "Initialized git repo at $scaffold_dir"
+
+  # Add remote if provided
+  if [ -n "$remote" ]; then
+    git remote add origin "$remote"
+    log "Added remote: $remote"
+  fi
+
+  # Allocate slot
+  local slot
+  slot=$(find_free_slot)
+  info "Allocated slot $slot for $session_name"
+
+  # Calculate ports
+  local ports
+  ports=$(slot_ports "$slot")
+  read -r wt_frontend wt_backend wt_supa_api wt_supa_db wt_supa_studio <<< "$ports"
+
+  # Register in port registry
+  local agents_json
+  agents_json=$(echo "$agent" | tr ',' '\n' | jq -R . | jq -s .)
+  (
+    flock -x 200
+    local tmp
+    tmp=$(mktemp)
+    jq --arg name "$session_name" \
+       --arg project "$name" \
+       --arg agent "$agent" \
+       --argjson agents "$agents_json" \
+       --argjson slot "$slot" \
+       --arg path "$scaffold_dir" \
+       --arg owner "$USER" \
+       --argjson frontend "$wt_frontend" \
+       --argjson backend "$wt_backend" \
+       --argjson supa_api "$wt_supa_api" \
+       --argjson supa_db "$wt_supa_db" \
+       --argjson supa_studio "$wt_supa_studio" \
+       --arg created "$(date -Iseconds)" \
+       '.[$name] = {
+          project: $project,
+          branch: "main",
+          slot: $slot,
+          agent: $agent,
+          agents: $agents,
+          path: $path,
+          owner: $owner,
+          type: "scaffold",
+          ports: {
+            frontend: $frontend,
+            backend: $backend,
+            supa_api: $supa_api,
+            supa_db: $supa_db,
+            supa_studio: $supa_studio
+          },
+          created: $created
+        }' "$PORT_REGISTRY" > "$tmp"
+    mv -f "$tmp" "$PORT_REGISTRY"
+    fix_registry_perms
+  ) 200>"${PORT_REGISTRY}.lock"
+
+  # Source secrets
+  local env_prefix=""
+  if [ -f "$SECRETS_FILE" ]; then
+    env_prefix="set -a && source $SECRETS_FILE && set +a && "
+  fi
+
+  # Build agent command
+  local claude_flags=""
+  if [ "$yolo" = true ]; then
+    claude_flags=" --dangerously-skip-permissions"
+    ensure_claude_skip_prompt
+  fi
+
+  ensure_claude_trust "$scaffold_dir"
+
+  local agent_cmd
+  local prompt_arg=""
+  if [ -n "$prompt" ]; then
+    local escaped_prompt="${prompt//\\/\\\\}"
+    escaped_prompt="${escaped_prompt//\$/\\\$}"
+    escaped_prompt="${escaped_prompt//\`/\\\`}"
+    escaped_prompt="${escaped_prompt//\"/\\\"}"
+    prompt_arg=" \"${escaped_prompt}\""
+  fi
+
+  local primary_agent
+  primary_agent=$(echo "$agent" | cut -d',' -f1)
+
+  case "$primary_agent" in
+    claude)
+      agent_cmd="cd $scaffold_dir && claude${claude_flags}${prompt_arg}"
+      ;;
+    codex)
+      agent_cmd="cd $scaffold_dir && codex${prompt_arg}"
+      ;;
+    none)
+      agent_cmd="cd $scaffold_dir && echo 'Ready. No agent started.' && bash"
+      ;;
+    *)
+      die "Unknown agent: $primary_agent. Use claude, codex, or none."
+      ;;
+  esac
+
+  # Set port env vars on tmux session
+  local ip
+  ip=$(get_ip)
+
+  # Create tmux session with windows
+  create_tmux_windows "$session_name" "scaffold" "$scaffold_dir" "$env_prefix" "$agent_cmd" "" "$wt_frontend" "$wt_backend" "$ip"
+
+  # Add extra agent windows for dual-agent mode
+  local IFS_BAK="$IFS"
+  IFS=',' read -ra agent_list <<< "$agent"
+  IFS="$IFS_BAK"
+  if [ ${#agent_list[@]} -gt 1 ]; then
+    for extra_agent in "${agent_list[@]:1}"; do
+      local extra_cmd
+      case "$extra_agent" in
+        claude) extra_cmd="cd $scaffold_dir && claude${claude_flags}" ;;
+        codex)  extra_cmd="cd $scaffold_dir && codex" ;;
+        *)      warn "Unknown agent '$extra_agent', skipping"; continue ;;
+      esac
+      tmux new-window -t "$session_name" -n "agent-${extra_agent}" "${env_prefix}${extra_cmd}"
+      info "Added agent window: agent-${extra_agent}"
+    done
+  fi
+
+  [ "$wt_frontend" != "null" ] && tmux set-environment -t "$session_name" DEV_FRONTEND_PORT "$wt_frontend"
+  [ "$wt_backend" != "null" ] && tmux set-environment -t "$session_name" DEV_BACKEND_PORT "$wt_backend"
+  tmux set-environment -t "$session_name" DEV_SLOT "$slot"
+
+  log "Scaffold session '$session_name' is running!"
+  random_celebration
+  echo ""
+  echo -e "  ${BOLD}Session:${NC}  $session_name"
+  echo -e "  ${BOLD}Agent(s):${NC} $agent"
+  echo -e "  ${BOLD}Type:${NC}     scaffold ${DIM}(new project, no worktree)${NC}"
+  echo -e "  ${BOLD}Path:${NC}     $scaffold_dir"
+  echo -e "  ${BOLD}Frontend:${NC} http://$ip:$wt_frontend"
+  echo -e "  ${BOLD}Backend:${NC}  http://$ip:$wt_backend"
+  if [ -n "$remote" ]; then
+    echo -e "  ${BOLD}Remote:${NC}   $remote"
+  fi
+  echo ""
+  echo -e "  ${DIM}Attach:    dev attach $session_name${NC}"
+  echo -e "  ${DIM}Kill:      dev kill $session_name${NC}"
+  if [ -z "$remote" ]; then
+    echo -e "  ${DIM}Add remote: cd $scaffold_dir && git remote add origin <url>${NC}"
+  fi
+  echo ""
+
+  if [ "$attach" = true ]; then
+    tmux attach-session -t "$session_name"
+  fi
+}
+
 cmd_review() {
   local session_or_pr="${2:-}" yolo=false
   shift || true
@@ -5168,6 +5573,12 @@ cmd_help() {
                                             --agent claude|codex (default: claude)
                                             --print  One-shot answer, no tmux session
                                             --yolo   Skip permissions (Claude only)
+    dev scaffold <name> [--agent claude|codex|none] [--yolo] [--attach] [--remote <git-url>] [--prompt "..."]
+                                            Scaffold a new project from scratch
+                                            Creates a directory, inits git, starts agent
+                                            Use the agent to generate initial project code
+                                            --remote sets a git remote for pushing later
+                                            --prompt provides an initial instruction for the agent
     dev ghost [prompt]                      Start a standalone AI session (no project/repo)
                                             --agent claude|codex|none (default: claude)
                                             --name <label>  Custom session name
@@ -5259,6 +5670,11 @@ cmd_help() {
                                             --from base the worktree off a specific branch
                                             --private hide task from other users
                                             --plan create a plan first, wait for approval before implementing
+    dev task import <file.csv> [--project <default>] [--from <base>] [--private] [--dry-run]
+                                            Batch-import tasks from a CSV file
+                                            CSV columns: project,description[,branch][,from_branch][,private]
+                                            --project sets default project for rows missing one
+                                            --dry-run preview without adding tasks
     dev task approve <id>                   Approve a plan-review task and start implementation
     dev task ls [--pending|--running|--done|--failed|--pr-created|--plan-review|--all]
                                             List tasks (filterable by status)
@@ -5301,6 +5717,9 @@ cmd_help() {
     dev pr-start klyra https://github.com/org/klyra/pull/42  # start from PR URL
     dev ask klyra "how does the auth flow work?"
     dev ask klyra                                # interactive session
+    dev scaffold my-app                            # scaffold a new project
+    dev scaffold my-app --remote git@github.com:me/my-app.git  # with remote
+    dev scaffold my-app --yolo --prompt "create a Next.js app with auth"
     dev ghost                                    # standalone AI, no project
     dev ghost --name research "explain OAuth2"   # named ghost session
     dev agent add klyra-feat-trading-ui codex
@@ -5370,6 +5789,7 @@ case "${1:-help}" in
   notify)    cmd_notify "$@" ;;
   ask)       cmd_ask "$@" ;;
   ghost)     cmd_ghost "$@" ;;
+  scaffold)  cmd_scaffold "$@" ;;
   review)    cmd_review "$@" ;;
   mobile|m)  cmd_mobile ;;
   vibes)     cmd_vibes ;;
