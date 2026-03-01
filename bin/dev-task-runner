@@ -122,14 +122,15 @@ process_pending() {
   task_json=$(jq -r '.tasks[] | select(.status == "pending") | @json' "$TASK_REGISTRY" | head -1)
   [ -n "$task_json" ] || return 0
 
-  local id project branch description from_branch
+  local id project branch description from_branch mode
   id=$(echo "$task_json" | jq -r '.id')
   project=$(echo "$task_json" | jq -r '.project')
   branch=$(echo "$task_json" | jq -r '.branch')
   description=$(echo "$task_json" | jq -r '.description')
   from_branch=$(echo "$task_json" | jq -r '.from_branch // empty')
+  mode=$(echo "$task_json" | jq -r '.mode // "normal"')
 
-  log "Processing task $id: $project/$branch — $description"
+  log "Processing task $id: $project/$branch (mode: $mode) — $description"
 
   # Mark as running
   local now
@@ -142,7 +143,12 @@ process_pending() {
   # Build the prompt that will be passed directly to Claude as a CLI argument.
   # This avoids the unreliable tmux send-keys approach which races against
   # Claude's terminal UI initialization.
-  local prompt="Read the TASK.md file in this project root. It contains your task. Follow the instructions carefully. When you are completely done, run: touch .task-done"
+  local prompt
+  if [ "$mode" = "plan" ]; then
+    prompt="Read the TASK.md file in this project root. It contains your task. Follow the instructions carefully. When you are completely done, run: touch .task-plan-ready"
+  else
+    prompt="Read the TASK.md file in this project root. It contains your task. Follow the instructions carefully. When you are completely done, run: touch .task-done"
+  fi
 
   # Create session via dev new with --prompt to pass the task directly to Claude.
   # Claude receives the prompt as a CLI argument and begins working immediately
@@ -189,7 +195,41 @@ process_pending() {
   # The worktree already exists (dev new creates it synchronously before launching tmux),
   # and Claude is still initializing in the background, so TASK.md will be ready
   # by the time Claude processes the prompt.
-  cat > "$worktree/TASK.md" << TASKEOF
+  if [ "$mode" = "plan" ]; then
+    cat > "$worktree/TASK.md" << TASKEOF
+# Task: $description
+
+## Project
+$project
+
+## Branch
+$branch
+
+## Mode
+Plan only — do NOT implement yet.
+
+## Instructions
+
+Read and understand the codebase, then create a detailed implementation plan for the following task:
+
+$description
+
+Write your plan to a file called **PLAN.md** in the project root. The plan should include:
+
+1. A summary of the approach
+2. List of files to modify or create
+3. Step-by-step implementation details
+4. Any potential risks or trade-offs
+5. Testing strategy
+
+## When done
+
+After writing PLAN.md, create the ready marker: \`touch .task-plan-ready\`
+
+**Important:** Do NOT implement any code changes. Only create the plan. A human will review PLAN.md and approve it before implementation begins.
+TASKEOF
+  else
+    cat > "$worktree/TASK.md" << TASKEOF
 # Task: $description
 
 ## Project
@@ -219,6 +259,7 @@ $description
 
 This signals the task runner that you've completed the work.
 TASKEOF
+  fi
 
   log "Wrote TASK.md to $worktree"
 
@@ -257,6 +298,33 @@ check_running() {
 
     worktree=$(jq -r --arg s "$session" '.[$s].worktree // .[$s].path // empty' "$PORT_REGISTRY")
     [ -n "$worktree" ] && [ -d "$worktree" ] || continue
+
+    # Check for .task-plan-ready marker (plan mode tasks)
+    if [ -f "$worktree/.task-plan-ready" ]; then
+      local task_mode
+      task_mode=$(task_field "$id" "mode")
+      if [ "$task_mode" = "plan" ]; then
+        log "Task $id plan ready for review (session: $session)"
+        update_task "$id" "status" "plan-review"
+
+        local description project hostname
+        description=$(task_field "$id" "description")
+        project=$(task_field "$id" "project")
+        hostname=$(hostname 2>/dev/null || echo "unknown")
+
+        send_telegram "📋 *Plan Ready for Review*
+
+📋 *Task #${id}:* ${description}
+📦 *Project:* \`${project}\`
+🖥 *Host:* \`${hostname}\`
+🤖 *Session:* \`${session}\`
+
+_Review the plan with:_ \`dev attach ${session}\`
+_Then approve with:_ \`dev task approve ${id}\`"
+
+        continue
+      fi
+    fi
 
     # Check for .task-done marker
     if [ -f "$worktree/.task-done" ]; then

@@ -36,6 +36,7 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
 DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
@@ -4264,7 +4265,7 @@ cmd_task() {
 
   case "$subcmd" in
     add)
-      local project="" branch="" description="" from_branch="" private=false
+      local project="" branch="" description="" from_branch="" private=false mode="normal"
       shift 2  # skip "task add"
 
       # Parse positional args and flags
@@ -4273,6 +4274,7 @@ cmd_task() {
           --from) from_branch="${2:-}"; shift 2 ;;
           --from=*) from_branch="${1#*=}"; shift ;;
           --private) private=true; shift ;;
+          --plan) mode="plan"; shift ;;
           *)
             if [ -z "$project" ]; then
               project="$1"
@@ -4286,7 +4288,7 @@ cmd_task() {
         esac
       done
 
-      [ -n "$project" ] || die "Usage: dev task add <project> [branch] \"description\" [--from <base>] [--private]"
+      [ -n "$project" ] || die "Usage: dev task add <project> [branch] \"description\" [--from <base>] [--private] [--plan]"
 
       # If only two positional args given (project + description, no branch),
       # treat second arg as description and auto-generate branch name
@@ -4295,7 +4297,7 @@ cmd_task() {
         branch=""
       fi
 
-      [ -n "$description" ] || die "Usage: dev task add <project> [branch] \"description\" [--from <base>] [--private]"
+      [ -n "$description" ] || die "Usage: dev task add <project> [branch] \"description\" [--from <base>] [--private] [--plan]"
 
       # Auto-generate branch name from description if not provided
       if [ -z "$branch" ]; then
@@ -4318,6 +4320,7 @@ cmd_task() {
          --arg desc "$description" --arg now "$now" \
          --arg from "$from_branch" \
          --argjson private "$private" \
+         --arg mode "$mode" \
         '.tasks += [{
           id: $id,
           project: $proj,
@@ -4325,6 +4328,7 @@ cmd_task() {
           description: $desc,
           from_branch: (if $from == "" then null else $from end),
           private: $private,
+          mode: $mode,
           status: "pending",
           session: null,
           pr_url: null,
@@ -4333,10 +4337,12 @@ cmd_task() {
           completed: null
         }] | .next_id = (.next_id + 1)' "$TASK_REGISTRY" > "$tmp" && mv "$tmp" "$TASK_REGISTRY"
 
+      local mode_label=""
+      [ "$mode" = "plan" ] && mode_label=" [plan mode]"
       if [ -n "$from_branch" ]; then
-        log "Task #$id added: $project/$branch (from $from_branch) — $description"
+        log "Task #$id added: $project/$branch (from $from_branch)${mode_label} — $description"
       else
-        log "Task #$id added: $project/$branch — $description"
+        log "Task #$id added: $project/$branch${mode_label} — $description"
       fi
       ;;
     ls|list)
@@ -4356,7 +4362,8 @@ cmd_task() {
           --running)    filter="running" ;;
           --done)       filter="done" ;;
           --failed)     filter="failed" ;;
-          --pr-created) filter="pr-created" ;;
+          --pr-created)   filter="pr-created" ;;
+          --plan-review)  filter="plan-review" ;;
           *) warn "Unknown flag: $arg" ;;
         esac
         i=$((i + 1))
@@ -4391,11 +4398,12 @@ cmd_task() {
       while IFS=$'\t' read -r id status project branch desc; do
         local color="$NC"
         case "$status" in
-          pending)    color="$YELLOW" ;;
-          running)    color="$BLUE" ;;
-          pr-created) color="$CYAN" ;;
-          done)       color="$GREEN" ;;
-          failed)     color="$RED" ;;
+          pending)     color="$YELLOW" ;;
+          running)     color="$BLUE" ;;
+          plan-review) color="$MAGENTA" ;;
+          pr-created)  color="$CYAN" ;;
+          done)        color="$GREEN" ;;
+          failed)      color="$RED" ;;
         esac
         printf "  %-4s ${color}%-12s${NC} %-20s %-25s %s\n" "$id" "$status" "$project" "$branch" "$desc"
       done
@@ -4459,8 +4467,107 @@ cmd_task() {
       jq ".tasks = [.tasks[] | ${keep_expr}]" "$TASK_REGISTRY" > "$tmp" && mv "$tmp" "$TASK_REGISTRY"
       log "Pruned $count task(s) (filter: ${prune_filter})"
       ;;
+    approve)
+      local id="${3:-}"
+      [ -n "$id" ] || die "Usage: dev task approve <id>"
+
+      # Validate task exists and has plan-review status
+      local task_status task_mode
+      task_status=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .status' "$TASK_REGISTRY")
+      [ -n "$task_status" ] || die "Task #$id not found"
+      [ "$task_status" = "plan-review" ] || die "Task #$id is not in plan-review status (current: $task_status)"
+
+      task_mode=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .mode // "normal"' "$TASK_REGISTRY")
+      [ "$task_mode" = "plan" ] || die "Task #$id is not a plan-mode task"
+
+      # Get session and worktree
+      local session worktree
+      session=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .session // empty' "$TASK_REGISTRY")
+      [ -n "$session" ] || die "Task #$id has no session"
+
+      worktree=$(jq -r --arg s "$session" '.[$s].worktree // .[$s].path // empty' "$PORT_REGISTRY")
+      [ -n "$worktree" ] && [ -d "$worktree" ] || die "Worktree not found for session '$session'"
+
+      # Remove plan-ready marker
+      rm -f "$worktree/.task-plan-ready"
+
+      # Rewrite TASK.md with implementation instructions
+      local description branch
+      description=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .description' "$TASK_REGISTRY")
+      branch=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .branch' "$TASK_REGISTRY")
+
+      cat > "$worktree/TASK.md" << TASKEOF
+# Task: $description
+
+## Project
+$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .project' "$TASK_REGISTRY")
+
+## Branch
+$branch
+
+## Instructions
+
+The plan has been approved. Now implement it.
+
+Read PLAN.md in this project root — it contains the detailed implementation plan you created earlier.
+Follow the plan step by step and implement all the changes described.
+
+## When done
+
+1. Make sure all changes are committed
+2. Run any relevant tests to verify your changes work
+3. Push your branch and create a PR:
+   - Write a clear, concise PR title that describes what you actually changed (do NOT just use the task description verbatim)
+   - Write a PR body with a summary of what was done and why
+   - Use: \`gh pr create --title "Your title" --body "Your description" --head $branch\`
+   - Save the PR URL to a file: \`echo "https://github.com/..." > .task-pr-url\`
+4. After the PR is created, create the done marker: \`touch .task-done\`
+
+**Important:** The PR title should be a proper, descriptive title (e.g. "Add retry logic to API client" or "Fix race condition in session cleanup"), NOT a copy of the task prompt. The PR body should summarize the changes made.
+
+This signals the task runner that you've completed the work.
+TASKEOF
+
+      # Update task status back to running
+      local now tmp
+      now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+      tmp="$TASK_REGISTRY.tmp.$$"
+      jq --arg id "$id" --arg now "$now" \
+        '(.tasks[] | select(.id == $id)) |= (.status = "running" | .approved = $now)' \
+        "$TASK_REGISTRY" > "$tmp" && mv "$tmp" "$TASK_REGISTRY"
+
+      # Restart the Claude session with implementation prompt
+      local prompt="Read the TASK.md file in this project root. It contains your task. The plan in PLAN.md has been approved — implement it now. Follow the instructions carefully. When you are completely done, run: touch .task-done"
+
+      # Source secrets
+      local env_prefix=""
+      if [ -f "$SECRETS_FILE" ]; then
+        env_prefix="set -a && source $SECRETS_FILE && set +a && "
+      fi
+
+      # Resolve yolo mode
+      local project yolo=false claude_flags=""
+      project=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .project' "$TASK_REGISTRY")
+      if [ -n "$project" ] && [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
+        local config_yolo
+        config_yolo=$(jq -r '.skip_permissions // false' "$CONFIG_DIR/projects/${project}.json")
+        [ "$config_yolo" = "true" ] && yolo=true
+      fi
+      if [ "$yolo" = true ]; then
+        claude_flags=" --dangerously-skip-permissions"
+        ensure_claude_skip_prompt
+      fi
+      ensure_claude_trust "$worktree"
+
+      # Kill the agent window and recreate with new prompt
+      tmux kill-window -t "${session}:agent" 2>/dev/null || true
+      sleep 1
+      tmux new-window -t "$session" -n "agent" "${env_prefix}cd $worktree && claude${claude_flags} --prompt $(printf '%q' "$prompt")"
+
+      log "Task #$id approved — restarted Claude with implementation prompt"
+      ;;
     import)
-      local file="" import_project_default="" import_from="" import_private=false dry_run=false
+      local file="" import_project_default="" import_from="" import_private=false import_plan=false dry_run=false
       shift 2  # skip "task import"
 
       while [[ $# -gt 0 ]]; do
@@ -4468,6 +4575,7 @@ cmd_task() {
           --from) import_from="${2:-}"; shift 2 ;;
           --from=*) import_from="${1#*=}"; shift ;;
           --private) import_private=true; shift ;;
+          --plan) import_plan=true; shift ;;
           --dry-run) dry_run=true; shift ;;
           --project) import_project_default="${2:-}"; shift 2 ;;
           --project=*) import_project_default="${1#*=}"; shift ;;
@@ -4480,7 +4588,7 @@ cmd_task() {
         esac
       done
 
-      [ -n "$file" ] || die "Usage: dev task import <file.csv> [--project <default-project>] [--from <base>] [--private] [--dry-run]"
+      [ -n "$file" ] || die "Usage: dev task import <file.csv> [--project <default-project>] [--from <base>] [--private] [--plan] [--dry-run]"
       [ -f "$file" ] || die "File not found: $file"
 
       local count=0 errors=0 line_num=0
@@ -4540,12 +4648,16 @@ cmd_task() {
         local csv_branch="${trimmed_fields[2]:-}"
         local csv_from="${trimmed_fields[3]:-}"
         local csv_private="${trimmed_fields[4]:-}"
+        local csv_mode="${trimmed_fields[5]:-}"
 
         # Apply defaults
         [ -z "$csv_project" ] && csv_project="$import_project_default"
         [ -z "$csv_from" ] && csv_from="$import_from"
         if [ "$import_private" = true ] && [ -z "$csv_private" ]; then
           csv_private="true"
+        fi
+        if [ "$import_plan" = true ] && [ -z "$csv_mode" ]; then
+          csv_mode="plan"
         fi
 
         # Validate required fields
@@ -4578,8 +4690,14 @@ cmd_task() {
         local is_private=false
         [[ "$csv_private" =~ ^(true|yes|1)$ ]] && is_private=true
 
+        # Normalize mode field
+        local task_mode="normal"
+        [[ "$csv_mode" =~ ^(plan|true|yes|1)$ ]] && task_mode="plan"
+
         if [ "$dry_run" = true ]; then
-          echo -e "  ${DIM}[dry-run]${NC} $csv_project/$csv_branch — $csv_description"
+          local mode_tag=""
+          [ "$task_mode" = "plan" ] && mode_tag=" ${MAGENTA}[plan]${NC}"
+          echo -e "  ${DIM}[dry-run]${NC} $csv_project/$csv_branch — $csv_description${mode_tag}"
           count=$((count + 1))
           continue
         fi
@@ -4594,6 +4712,7 @@ cmd_task() {
            --arg desc "$csv_description" --arg now "$now" \
            --arg from "$csv_from" \
            --argjson private "$is_private" \
+           --arg mode "$task_mode" \
           '.tasks += [{
             id: $id,
             project: $proj,
@@ -4601,6 +4720,7 @@ cmd_task() {
             description: $desc,
             from_branch: (if $from == "" then null else $from end),
             private: $private,
+            mode: $mode,
             status: "pending",
             session: null,
             pr_url: null,
@@ -4655,11 +4775,14 @@ cmd_task() {
       fi
       ;;
     *)
-      echo "Usage: dev task <add|import|ls|rm|prune|run|watch|log>"
+      echo "Usage: dev task <add|import|ls|approve|rm|prune|run|watch|log>"
       echo ""
-      echo "  add <project> [branch] \"desc\" [--from <base>]  Add a task to the queue"
-      echo "  import <file.csv> [--project <p>] [--from <base>] [--private] [--dry-run]"
+      echo "  add <project> [branch] \"desc\" [--from <base>] [--plan]"
+      echo "                                 Add a task to the queue"
+      echo "                                 --plan creates plan first, waits for approval"
+      echo "  import <file.csv> [--project <p>] [--from <base>] [--private] [--plan] [--dry-run]"
       echo "                                 Batch-import tasks from a CSV file"
+      echo "  approve <id>                   Approve a plan-review task and start implementation"
       echo "  ls [--pending|--running|...]    List tasks (filter by status)"
       echo "  rm <id>                        Remove a task"
       echo "  prune [--failed|--all-finished] [--dry-run]"
@@ -5554,17 +5677,20 @@ cmd_help() {
     dev bot status                          Show bot status
 
   TASKS (automated task queue)
-    dev task add <project> [branch] "desc" [--from <base>] [--private]
+    dev task add <project> [branch] "desc" [--from <base>] [--private] [--plan]
                                             Add a task to the queue
                                             Branch is optional — auto-generated from description if omitted
                                             --from base the worktree off a specific branch
                                             --private hide task from other users
-    dev task import <file.csv> [--project <default>] [--from <base>] [--private] [--dry-run]
+                                            --plan create a plan first, wait for approval before implementing
+    dev task import <file.csv> [--project <default>] [--from <base>] [--private] [--plan] [--dry-run]
                                             Batch-import tasks from a CSV file
-                                            CSV columns: project,description[,branch][,from_branch][,private]
+                                            CSV columns: project,description[,branch][,from_branch][,private][,mode]
                                             --project sets default project for rows missing one
+                                            --plan set all imported tasks to plan mode (unless overridden per-row)
                                             --dry-run preview without adding tasks
-    dev task ls [--pending|--running|--done|--failed|--pr-created|--all]
+    dev task approve <id>                   Approve a plan-review task and start implementation
+    dev task ls [--pending|--running|--done|--failed|--pr-created|--plan-review|--all]
                                             List tasks (filterable by status)
     dev task rm <id>                        Remove a task
     dev task prune [--failed|--all-finished] [--dry-run]

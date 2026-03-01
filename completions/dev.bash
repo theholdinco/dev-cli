@@ -62,7 +62,7 @@ _dev() {
       bot)      COMPREPLY=( $(compgen -W "setup start stop status" -- "$cur") ) ;;
       services) COMPREPLY=( $(compgen -W "install uninstall start stop restart status logs" -- "$cur") ) ;;
       notify)   COMPREPLY=( $(compgen -W "setup status test delay" -- "$cur") ) ;;
-      task)     COMPREPLY=( $(compgen -W "add import ls rm prune run watch log" -- "$cur") ) ;;
+      task)     COMPREPLY=( $(compgen -W "add import ls approve rm prune run watch log" -- "$cur") ) ;;
       agent)    COMPREPLY=( $(compgen -W "add remove list" -- "$cur") ) ;;
       config)   COMPREPLY=( $(compgen -W "show reset project" -- "$cur") ) ;;
     esac
@@ -132,7 +132,7 @@ _dev() {
       return 0
     fi
     if [[ "$cur" == -* ]]; then
-      COMPREPLY=( $(compgen -W "--project --from --private --dry-run" -- "$cur") )
+      COMPREPLY=( $(compgen -W "--project --from --private --plan --dry-run" -- "$cur") )
       return 0
     fi
     # Default to file completion (handled by bash)
@@ -141,7 +141,13 @@ _dev() {
 
   # task ls <flags>
   if [ "$cmd" = "task" ] && [ "${COMP_WORDS[2]:-}" = "ls" ]; then
-    COMPREPLY=( $(compgen -W "--all --pending --running --done --failed --pr-created" -- "$cur") )
+    COMPREPLY=( $(compgen -W "--all --pending --running --done --failed --pr-created --plan-review" -- "$cur") )
+    return 0
+  fi
+
+  # task add <project> <desc> <flags>
+  if [ "$cmd" = "task" ] && [ "${COMP_WORDS[2]:-}" = "add" ] && [ "$COMP_CWORD" -ge 4 ]; then
+    COMPREPLY=( $(compgen -W "--from --private --plan" -- "$cur") )
     return 0
   fi
 
