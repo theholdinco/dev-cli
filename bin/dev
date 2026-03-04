@@ -72,6 +72,9 @@ DEFAULT_CONFIG='{
   },
   "ghost": {
     "linked_dirs": []
+  },
+  "review": {
+    "auto_fix": false
   }
 }'
 
@@ -3484,7 +3487,20 @@ cmd_config() {
       new_refresh="${new_refresh:-$cur_refresh}"
 
       echo ""
-      echo -e "  ${CYAN}6. Tmux window layout${NC}"
+      local cur_auto_fix
+      cur_auto_fix=$(get_config_value '.review.auto_fix' 'false')
+      local default_auto_fix="n"
+      [ "$cur_auto_fix" = "true" ] && default_auto_fix="y"
+      echo -e "  ${CYAN}6. Auto-fix issues after review${NC}"
+      echo -e "  ${DIM}When enabled, the review agent will also fix issues and open a fix PR${NC}"
+      read -rp "  Enable auto-fix (y/n) [$default_auto_fix]: " auto_fix_choice
+      local new_auto_fix=false
+      case "${auto_fix_choice:-$default_auto_fix}" in
+        y|Y|yes) new_auto_fix=true ;;
+      esac
+
+      echo ""
+      echo -e "  ${CYAN}7. Tmux window layout${NC}"
       local cur_windows
       cur_windows=$(get_tmux_windows "")
       local cur_win_names
@@ -3520,7 +3536,8 @@ cmd_config() {
         --arg accent "$new_accent" \
         --argjson refresh "$new_refresh" \
         --argjson wins "$windows_json" \
-        '.defaults.agents = [$agent] | .defaults.package_manager = $pkg | .defaults.task_filter = $filter | .hub.theme.accent = $accent | .hub.refresh_seconds = $refresh | .tmux.windows = $wins' \
+        --argjson auto_fix "$new_auto_fix" \
+        '.defaults.agents = [$agent] | .defaults.package_manager = $pkg | .defaults.task_filter = $filter | .hub.theme.accent = $accent | .hub.refresh_seconds = $refresh | .tmux.windows = $wins | .review.auto_fix = $auto_fix' \
         "$GLOBAL_CONFIG" > "$tmp"
       mv "$tmp" "$GLOBAL_CONFIG"
 
@@ -5294,7 +5311,7 @@ cmd_scaffold() {
 }
 
 cmd_review() {
-  local session_or_pr="${2:-}" yolo=false
+  local session_or_pr="${2:-}" yolo=false fix=""
   shift || true
   shift || true
 
@@ -5302,11 +5319,18 @@ cmd_review() {
   while [[ $# -gt 0 ]]; do
     case "${1:-}" in
       --yolo) yolo=true; shift ;;
+      --fix) fix=true; shift ;;
+      --no-fix) fix=false; shift ;;
       *) shift ;;
     esac
   done
 
-  [ -z "$session_or_pr" ] && die "Usage: dev review <session|pr-url> [--yolo]"
+  [ -z "$session_or_pr" ] && die "Usage: dev review <session|pr-url> [--yolo] [--fix|--no-fix]"
+
+  # Resolve auto_fix from global config if not set by flag
+  if [ -z "$fix" ]; then
+    fix=$(get_config_value '.review.auto_fix' 'false')
+  fi
 
   local pr_url="" project="" branch="" worktree=""
 
@@ -5421,13 +5445,19 @@ cmd_review() {
     prompt_file="$(dirname "$(readlink -f "$0")")/../prompts/pr-review.md"
   fi
 
+  # Build fix suffix for the agent prompt
+  local fix_instruction=""
+  if [ "$fix" = "true" ]; then
+    fix_instruction=" After submitting your review, fix any issues you found: create a new branch off the PR branch, commit your fixes, push, and open a pull request targeting the original PR branch so the fixes can be merged in."
+  fi
+
   local agent_cmd
   if [ -n "$prompt_file" ]; then
     # Copy prompt into the review worktree so Claude can read it
     cp "$prompt_file" "$tmp_path/.review-prompt.md"
-    agent_cmd="cd $tmp_path && claude${claude_flags} \"Read .review-prompt.md and follow the instructions to review this PR. The PR URL is: $pr_url\""
+    agent_cmd="cd $tmp_path && claude${claude_flags} \"Read .review-prompt.md and follow the instructions to review this PR. The PR URL is: $pr_url.${fix_instruction}\""
   else
-    agent_cmd="cd $tmp_path && claude${claude_flags} \"Review the PR at $pr_url. Run gh pr diff to see changes, run pnpm lint if available, check for code quality issues, slop comments, performance problems, and security concerns. Submit your review using gh pr review --comment. When done, run: touch .review-done\""
+    agent_cmd="cd $tmp_path && claude${claude_flags} \"Review the PR at $pr_url. Run gh pr diff to see changes, run pnpm lint if available, check for code quality issues, slop comments, performance problems, and security concerns. Submit your review using gh pr review --comment.${fix_instruction} When done, run: touch .review-done\""
   fi
 
   # Create tmux session
@@ -5442,7 +5472,9 @@ cmd_review() {
   echo -e "  ${BOLD}Project:${NC}  $project"
   echo -e "  ${BOLD}Branch:${NC}   $branch"
   echo -e "  ${BOLD}PR:${NC}       $pr_url"
-  echo -e "  ${BOLD}Type:${NC}     review ${DIM}(read-only, no ports)${NC}"
+  local fix_label="review only"
+  [ "$fix" = "true" ] && fix_label="review + fix PR"
+  echo -e "  ${BOLD}Type:${NC}     review ${DIM}(no ports — $fix_label)${NC}"
   echo ""
   echo -e "  ${DIM}Attach:    dev attach $name${NC}"
   echo -e "  ${DIM}Kill:      dev kill $name${NC}"
@@ -5623,6 +5655,8 @@ cmd_help() {
     dev review <session>                    Auto-review the PR for a session
     dev review <pr-url>                     Review a PR by URL
     dev review <session|pr-url> --yolo      Skip agent permissions
+    dev review <session|pr-url> --fix       Review and fix issues, opening a fix PR
+    dev review <session|pr-url> --no-fix    Review only (override auto_fix config)
 
   UTILITIES
     dev ports                               Show port allocation table
