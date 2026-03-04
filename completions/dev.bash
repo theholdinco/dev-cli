@@ -157,6 +157,12 @@ _dev() {
     return 0
   fi
 
+  # new <project> <branch> <flags>
+  if [ "$cmd" = "new" ] && [ "$COMP_CWORD" -ge 4 ]; then
+    COMPREPLY=( $(compgen -W "--agent --agents --from --yolo --attach --run --private --container --headless --env --prompt" -- "$cur") )
+    return 0
+  fi
+
   return 0
 }
 

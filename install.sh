@@ -143,8 +143,9 @@ if [ ! -f "$CONFIG_DIR/secrets.env" ]; then
 # API Keys — this file is chmod 600
 # Sourced by dev CLI when launching agents
 
-# Claude Code (Anthropic)
-# ANTHROPIC_API_KEY=sk-ant-...
+# Claude Code — pick ONE (not both):
+# CLAUDE_CODE_OAUTH_TOKEN=    # Pro/Max subscription (run: claude setup-token)
+# ANTHROPIC_API_KEY=sk-ant-... # API key (pay-per-token billing)
 
 # Codex (OpenAI)
 # OPENAI_API_KEY=sk-...
