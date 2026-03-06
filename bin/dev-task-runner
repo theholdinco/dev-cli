@@ -504,11 +504,19 @@ check_merged() {
     if [ "$pr_state" = "MERGED" ]; then
       log "Task $id PR merged: $pr_url"
 
-      # Kill the session if still running
+      # Kill the task session if still running
       session=$(task_field "$id" "session")
       if [ -n "$session" ] && [ "$session" != "null" ] && tmux has-session -t "$session" 2>/dev/null; then
         log "Killing session $session for completed task $id"
         dev kill "$session" 2>&1 | tail -3 >> "$LOG_FILE" || true
+      fi
+
+      # Kill the review session if still running
+      local review_session
+      review_session=$(task_field "$id" "review_session")
+      if [ -n "$review_session" ] && [ "$review_session" != "null" ] && tmux has-session -t "$review_session" 2>/dev/null; then
+        log "Killing review session $review_session for completed task $id"
+        dev kill "$review_session" -f 2>&1 | tail -3 >> "$LOG_FILE" || true
       fi
 
       local now
@@ -537,16 +545,24 @@ run_once() {
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+LOCK_FILE="/tmp/dev-task-runner-${USER}.lock"
+
 case "${1:---once}" in
   --once)
-    log "Running single pass..."
-    run_once
-    log "Pass complete."
+    (
+      flock -w 120 200 || { log "Timeout waiting for lock — another instance is running."; exit 0; }
+      log "Running single pass..."
+      run_once
+      log "Pass complete."
+    ) 200>"$LOCK_FILE"
     ;;
   --watch)
     log "Starting watch mode (polling every 60s)..."
     while true; do
-      run_once
+      (
+        flock -n 200 || { log "Skipping cycle — another instance is running."; true; }
+        run_once
+      ) 200>"$LOCK_FILE"
       sleep 60
     done
     ;;

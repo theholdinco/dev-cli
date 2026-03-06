@@ -1,0 +1,859 @@
+#!/usr/bin/env bash
+###############################################################################
+# dev-linear — Linear issue ingestion daemon for dev-cli
+#
+# Polls Linear API for issues with a configured label, creates tasks in the
+# local queue, syncs status back to Linear (In Progress / comment / Done),
+# and optionally injects the Linear MCP server into worktrees.
+#
+# Usage:
+#   dev-linear --once    Single pass (used by: dev linear sync)
+#   dev-linear --watch   Loop mode daemon (used by: dev linear watch)
+###############################################################################
+
+set -euo pipefail
+
+CONFIG_DIR="$HOME/.config/dev-cli"
+GLOBAL_CONFIG="$CONFIG_DIR/config.json"
+TASK_REGISTRY="$CONFIG_DIR/tasks.json"
+LINEAR_STATE="$CONFIG_DIR/linear-state.json"
+LINEAR_CONTEXT_DIR="$CONFIG_DIR/linear-context"
+LOG_DIR="$CONFIG_DIR/logs"
+LOG_FILE="$LOG_DIR/linear.log"
+
+# Multi-user claimed-issues file
+GLOBAL_CLAIMED_FILE="/etc/dev-cli/linear-claimed.json"
+LOCAL_CLAIMED_FILE="$CONFIG_DIR/linear-claimed.json"
+
+LINEAR_API_URL="https://api.linear.app/graphql"
+DRY_RUN="${DRY_RUN:-false}"
+
+# Port registry (mirrors dev-task-runner logic)
+GLOBAL_PORT_REGISTRY="/etc/dev-cli/ports.json"
+if [ -f "$GLOBAL_PORT_REGISTRY" ] && [ -r "$GLOBAL_PORT_REGISTRY" ]; then
+  PORT_REGISTRY="$GLOBAL_PORT_REGISTRY"
+elif [ -f "$CONFIG_DIR/ports.json" ]; then
+  PORT_REGISTRY="$CONFIG_DIR/ports.json"
+else
+  PORT_REGISTRY="$GLOBAL_PORT_REGISTRY"
+fi
+
+mkdir -p "$LOG_DIR" "$LINEAR_CONTEXT_DIR"
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+
+log() {
+  local ts
+  ts=$(date '+%Y-%m-%d %H:%M:%S')
+  echo "[$ts] $1" >> "$LOG_FILE"
+  echo "[$ts] $1" >&2
+}
+
+# ── Config loading ────────────────────────────────────────────────────────────
+
+LINEAR_API_KEY=""
+LINEAR_TEAM_ID=""
+LINEAR_LABEL_NAME="auto-agent"
+POLL_INTERVAL=90
+DEFAULT_PROJECT=""
+DEFAULT_FROM_BRANCH="main"
+DEFAULT_MODE="normal"
+MCP_ENABLED="false"
+PROJECT_MAP="{}"
+FILTER_BY_STATE_NAME=""
+STATE_IN_REVIEW=""
+STATE_BLOCKED=""
+STATE_READY=""
+LINEAR_USER_ID=""
+
+load_config() {
+  [ -f "$GLOBAL_CONFIG" ] || {
+    log "ERROR: config.json not found. Run 'dev linear setup' first."
+    exit 1
+  }
+
+  LINEAR_API_KEY=$(jq -r '.linear.api_key // empty' "$GLOBAL_CONFIG")
+  LINEAR_TEAM_ID=$(jq -r '.linear.team_id // empty' "$GLOBAL_CONFIG")
+  LINEAR_LABEL_NAME=$(jq -r '.linear.label_name // "auto-agent"' "$GLOBAL_CONFIG")
+  POLL_INTERVAL=$(jq -r '.linear.poll_interval_seconds // 90' "$GLOBAL_CONFIG")
+  DEFAULT_PROJECT=$(jq -r '.linear.default_project // empty' "$GLOBAL_CONFIG")
+  DEFAULT_FROM_BRANCH=$(jq -r '.linear.default_from_branch // "main"' "$GLOBAL_CONFIG")
+  DEFAULT_MODE=$(jq -r '.linear.default_mode // "normal"' "$GLOBAL_CONFIG")
+  MCP_ENABLED=$(jq -r '.linear.mcp_enabled // false' "$GLOBAL_CONFIG")
+  PROJECT_MAP=$(jq -c '.linear.project_map // {}' "$GLOBAL_CONFIG")
+  FILTER_BY_STATE_NAME=$(jq -r '.linear.filter_by_state_name // empty' "$GLOBAL_CONFIG")
+  STATE_IN_REVIEW=$(jq -r '.linear.state_in_review // empty' "$GLOBAL_CONFIG")
+  STATE_BLOCKED=$(jq -r '.linear.state_blocked // empty' "$GLOBAL_CONFIG")
+  STATE_READY=$(jq -r '.linear.state_ready // empty' "$GLOBAL_CONFIG")
+  LINEAR_USER_ID=$(jq -r '.linear.user_id // empty' "$GLOBAL_CONFIG")
+
+  [ -n "$LINEAR_API_KEY" ] || {
+    log "ERROR: linear.api_key not configured. Run 'dev linear setup'."
+    exit 1
+  }
+  [ -n "$LINEAR_TEAM_ID" ] || {
+    log "ERROR: linear.team_id not configured. Run 'dev linear setup'."
+    exit 1
+  }
+  [ -n "$DEFAULT_PROJECT" ] || {
+    log "ERROR: linear.default_project not configured. Run 'dev linear setup'."
+    exit 1
+  }
+  [ -n "$LINEAR_USER_ID" ] || {
+    log "ERROR: linear.user_id not configured. Run 'dev linear setup'."
+    exit 1
+  }
+}
+
+# ── State management ──────────────────────────────────────────────────────────
+
+init_state() {
+  if [ ! -f "$LINEAR_STATE" ]; then
+    cat > "$LINEAR_STATE" << 'STATEOF'
+{
+  "last_sync": "1970-01-01T00:00:00Z",
+  "team_states": {},
+  "issue_to_task": {},
+  "issue_context": {},
+  "linear_status_synced": {},
+  "last_error": null
+}
+STATEOF
+  fi
+}
+
+get_state_field() {
+  local field="$1"
+  jq -r "$field // empty" "$LINEAR_STATE" 2>/dev/null
+}
+
+update_state_field() {
+  local field="$1" value="$2"
+  local tmp="$LINEAR_STATE.tmp.$$"
+  jq --arg v "$value" "$field = \$v" "$LINEAR_STATE" > "$tmp" && mv "$tmp" "$LINEAR_STATE"
+}
+
+# ── Linear API ────────────────────────────────────────────────────────────────
+
+linear_api() {
+  local query_json="$1"
+  local response
+  response=$(curl -s -X POST "$LINEAR_API_URL" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: $LINEAR_API_KEY" \
+    -d "$query_json" 2>&1) || {
+    log "ERROR: curl failed: $response"
+    return 1
+  }
+  echo "$response"
+}
+
+# ── Claimed issues (multi-user atomic safety) ─────────────────────────────────
+
+get_claimed_file() {
+  if [ -f "$GLOBAL_CLAIMED_FILE" ] && [ -w "$GLOBAL_CLAIMED_FILE" ]; then
+    echo "$GLOBAL_CLAIMED_FILE"
+  elif [ -d "/etc/dev-cli" ] && [ -w "/etc/dev-cli" ]; then
+    echo '{}' > "$GLOBAL_CLAIMED_FILE"
+    chmod 664 "$GLOBAL_CLAIMED_FILE" 2>/dev/null || true
+    echo "$GLOBAL_CLAIMED_FILE"
+  else
+    [ -f "$LOCAL_CLAIMED_FILE" ] || echo '{}' > "$LOCAL_CLAIMED_FILE"
+    echo "$LOCAL_CLAIMED_FILE"
+  fi
+}
+
+# Atomically claim an issue. Returns 0 if claimed, 1 if already taken.
+claim_issue() {
+  local issue_id="$1" task_id="$2"
+  local claimed_file
+  claimed_file=$(get_claimed_file)
+  (
+    flock -x 200
+    local existing
+    existing=$(jq -r --arg id "$issue_id" '.[$id] // empty' "$claimed_file" 2>/dev/null)
+    if [ -n "$existing" ]; then
+      exit 1
+    fi
+    local tmp
+    tmp=$(mktemp)
+    jq --arg id "$issue_id" --arg tid "$task_id" '.[$id] = $tid' "$claimed_file" > "$tmp"
+    mv "$tmp" "$claimed_file"
+  ) 200>"${claimed_file}.lock"
+}
+
+is_claimed() {
+  local issue_id="$1"
+  local claimed_file
+  claimed_file=$(get_claimed_file)
+  local existing
+  existing=$(jq -r --arg id "$issue_id" '.[$id] // empty' "$claimed_file" 2>/dev/null)
+  [ -n "$existing" ]
+}
+
+# ── Team workflow states (cached) ─────────────────────────────────────────────
+
+get_state_id_by_name() {
+  local name="$1"
+  [ -n "$name" ] || return 1
+  local lower
+  lower=$(echo "$name" | tr '[:upper:]' '[:lower:]')
+  jq -r --arg n "$lower" '.team_states.by_name[$n] // empty' "$LINEAR_STATE" 2>/dev/null
+}
+
+get_team_states() {
+  # Return if already cached with by_name present (force refresh if by_name absent for backward compat)
+  local cached_count has_by_name
+  cached_count=$(jq -r '.team_states | length' "$LINEAR_STATE" 2>/dev/null || echo "0")
+  has_by_name=$(jq -r 'if .team_states.by_name then "yes" else "no" end' "$LINEAR_STATE" 2>/dev/null || echo "no")
+  [ "$cached_count" -gt 0 ] && [ "$has_by_name" = "yes" ] && return 0
+
+  log "Fetching team workflow states..."
+
+  local query
+  query=$(jq -n --arg team_id "$LINEAR_TEAM_ID" \
+    '{"query": "{ team(id: \"\($team_id)\") { states { nodes { id name type } } } }"}')
+
+  local response
+  response=$(linear_api "$query") || return 1
+
+  local errors
+  errors=$(echo "$response" | jq -r '.errors // empty' 2>/dev/null)
+  if [ -n "$errors" ] && [ "$errors" != "null" ]; then
+    log "ERROR: Failed to fetch team states: $errors"
+    return 1
+  fi
+
+  local states_json
+  states_json=$(echo "$response" | jq '.data.team.states.nodes // []' 2>/dev/null)
+
+  if [ -z "$states_json" ] || [ "$states_json" = "null" ] || [ "$states_json" = "[]" ]; then
+    log "ERROR: No states returned. Check team_id: $LINEAR_TEAM_ID"
+    return 1
+  fi
+
+  # Build map: type → first matching state id, plus by_name (lowercase name → id)
+  local states_map
+  states_map=$(echo "$states_json" | jq '{
+    todo_id:        (map(select(.type == "unstarted")) | first | .id // ""),
+    in_progress_id: (map(select(.type == "started"))   | first | .id // ""),
+    done_id:        (map(select(.type == "completed"))  | first | .id // ""),
+    by_name:        (map({key: (.name | ascii_downcase), value: .id}) | from_entries)
+  }')
+
+  local tmp="$LINEAR_STATE.tmp.$$"
+  jq --argjson states "$states_map" '.team_states = $states' "$LINEAR_STATE" > "$tmp" && mv "$tmp" "$LINEAR_STATE"
+
+  log "Cached team states: $(echo "$states_map" | jq -c .)"
+}
+
+# ── Fetch new Linear issues ───────────────────────────────────────────────────
+
+fetch_new_issues() {
+  log "Fetching issues with label '$LINEAR_LABEL_NAME' assigned to $LINEAR_USER_ID..."
+
+  local query
+  if [ -n "$FILTER_BY_STATE_NAME" ]; then
+    query=$(jq -n \
+      --arg team_id "$LINEAR_TEAM_ID" \
+      --arg label_name "$LINEAR_LABEL_NAME" \
+      --arg state_name "$FILTER_BY_STATE_NAME" \
+      --arg user_id "$LINEAR_USER_ID" \
+      '{
+        query: "query($teamId: ID!, $labelName: String!, $stateName: String!, $userId: ID!) {
+          issues(filter: {
+            team: { id: { eq: $teamId } }
+            labels: { name: { eq: $labelName } }
+            state: { name: { eq: $stateName } }
+            assignee: { id: { eq: $userId } }
+          }) {
+            nodes {
+              id identifier title description priority url branchName
+              project { name }
+              labels { nodes { name } }
+            }
+          }
+        }",
+        variables: {
+          teamId: $team_id,
+          labelName: $label_name,
+          stateName: $state_name,
+          userId: $user_id
+        }
+      }')
+  else
+    query=$(jq -n \
+      --arg team_id "$LINEAR_TEAM_ID" \
+      --arg label_name "$LINEAR_LABEL_NAME" \
+      --arg user_id "$LINEAR_USER_ID" \
+      '{
+        query: "query($teamId: ID!, $labelName: String!, $userId: ID!) {
+          issues(filter: {
+            team: { id: { eq: $teamId } }
+            labels: { name: { eq: $labelName } }
+            state: { type: { in: [\"triage\", \"backlog\", \"unstarted\"] } }
+            assignee: { id: { eq: $userId } }
+          }) {
+            nodes {
+              id identifier title description priority url branchName
+              project { name }
+              labels { nodes { name } }
+            }
+          }
+        }",
+        variables: {
+          teamId: $team_id,
+          labelName: $label_name,
+          userId: $user_id
+        }
+      }')
+  fi
+
+  local response
+  response=$(linear_api "$query") || return 1
+
+  local errors
+  errors=$(echo "$response" | jq -r '.errors // empty' 2>/dev/null)
+  if [ -n "$errors" ] && [ "$errors" != "null" ]; then
+    log "ERROR: GraphQL errors fetching issues: $errors"
+    return 1
+  fi
+
+  echo "$response" | jq -c '.data.issues.nodes // []'
+}
+
+# ── Map Linear project name to dev-cli project ────────────────────────────────
+
+map_project() {
+  local linear_project="${1:-}"
+
+  # Try project_map first
+  if [ -n "$linear_project" ] && [ "$linear_project" != "null" ]; then
+    local mapped
+    mapped=$(echo "$PROJECT_MAP" | jq -r --arg p "$linear_project" '.[$p] // empty' 2>/dev/null)
+    if [ -n "$mapped" ]; then
+      echo "$mapped"
+      return
+    fi
+  fi
+
+  echo "$DEFAULT_PROJECT"
+}
+
+# ── Create task from Linear issue ─────────────────────────────────────────────
+
+create_task_from_issue() {
+  local issue_json="$1"
+
+  local issue_id title identifier url priority linear_project_name branch_name
+  issue_id=$(echo "$issue_json" | jq -r '.id')
+  title=$(echo "$issue_json" | jq -r '.title')
+  identifier=$(echo "$issue_json" | jq -r '.identifier')
+  url=$(echo "$issue_json" | jq -r '.url')
+  priority=$(echo "$issue_json" | jq -r '.priority // 0')
+  linear_project_name=$(echo "$issue_json" | jq -r '.project.name // ""')
+  branch_name=$(echo "$issue_json" | jq -r '.branchName // ""')
+
+  # Map to dev-cli project
+  local project
+  project=$(map_project "$linear_project_name")
+
+  # Validate project exists
+  if [ ! -f "$CONFIG_DIR/projects/${project}.json" ]; then
+    log "ERROR: Project '$project' not found (Linear project: '$linear_project_name'). Skipping $identifier."
+    return 1
+  fi
+
+  # Use Linear branch name if available, otherwise use identifier
+  local branch
+  if [ -n "$branch_name" ] && [ "$branch_name" != "null" ]; then
+    branch=$(echo "$branch_name" | sed 's/[^a-zA-Z0-9/_-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//' | tr '[:upper:]' '[:lower:]')
+  else
+    branch=$(echo "$identifier" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-zA-Z0-9-]/-/g')
+  fi
+
+  if [ "$DRY_RUN" = true ]; then
+    log "[DRY-RUN] Would create task: dev task add $project $branch \"$title\" --from $DEFAULT_FROM_BRANCH"
+    echo "dry-run-$$"
+    return 0
+  fi
+
+  log "Creating task for $identifier: $title (project: $project, branch: $branch)"
+
+  # Build flags
+  local from_flag="--from $DEFAULT_FROM_BRANCH"
+  local mode_flag=""
+  [ "$DEFAULT_MODE" = "plan" ] && mode_flag="--plan"
+
+  # Add task to the queue
+  local task_output
+  # shellcheck disable=SC2086
+  task_output=$(dev task add "$project" "$branch" "$title" $from_flag $mode_flag 2>&1) || {
+    log "ERROR: dev task add failed: $task_output"
+    return 1
+  }
+
+  # Parse task ID from output (e.g., "Task #5 added: ...")
+  local task_id
+  task_id=$(echo "$task_output" | grep -oP 'Task #\K[0-9]+' | head -1)
+
+  if [ -z "$task_id" ]; then
+    log "ERROR: Could not parse task ID from: $task_output"
+    return 1
+  fi
+
+  log "Task #$task_id created for $identifier"
+
+  # Save Linear context for this task (for TASK.md enrichment and status sync)
+  echo "$issue_json" > "$LINEAR_CONTEXT_DIR/${task_id}.json"
+
+  # Record issue→task mapping in state
+  local tmp="$LINEAR_STATE.tmp.$$"
+  jq --arg issue "$issue_id" --arg tid "$task_id" \
+    '.issue_to_task[$issue] = $tid' "$LINEAR_STATE" > "$tmp" && mv "$tmp" "$LINEAR_STATE"
+
+  echo "$task_id"
+}
+
+# ── Write rich TASK.md to worktree ────────────────────────────────────────────
+
+write_task_md() {
+  local task_id="$1" worktree="$2"
+
+  local context_file="$LINEAR_CONTEXT_DIR/${task_id}.json"
+  [ -f "$context_file" ] || return 0
+
+  local title identifier url priority description
+  title=$(jq -r '.title' "$context_file")
+  identifier=$(jq -r '.identifier' "$context_file")
+  url=$(jq -r '.url' "$context_file")
+  priority=$(jq -r '.priority // 0' "$context_file")
+  description=$(jq -r '.description // ""' "$context_file")
+
+  # Map priority number to label
+  local priority_label
+  case "$priority" in
+    1) priority_label="Urgent" ;;
+    2) priority_label="High" ;;
+    3) priority_label="Medium" ;;
+    4) priority_label="Low" ;;
+    *) priority_label="No priority" ;;
+  esac
+
+  local task_project task_branch task_mode
+  task_project=$(jq -r --arg id "$task_id" '.tasks[] | select(.id == $id) | .project' "$TASK_REGISTRY" 2>/dev/null || echo "")
+  task_branch=$(jq -r --arg id "$task_id" '.tasks[] | select(.id == $id) | .branch' "$TASK_REGISTRY" 2>/dev/null || echo "")
+  task_mode=$(jq -r --arg id "$task_id" '.tasks[] | select(.id == $id) | .mode // "normal"' "$TASK_REGISTRY" 2>/dev/null || echo "normal")
+
+  local when_done
+  if [ "$task_mode" = "plan" ]; then
+    when_done="After writing PLAN.md, create the ready marker: \`touch .task-plan-ready\`
+
+**Important:** Do NOT implement any code changes. Only create the plan. A human will review PLAN.md and approve it before implementation begins."
+  else
+    when_done="1. Make sure all changes are committed
+2. Run any relevant tests to verify your changes work
+3. Push your branch and create a PR:
+   - Write a clear, concise PR title that describes what you actually changed
+   - Use: \`gh pr create --title \"Your title\" --body \"Your description\" --head ${task_branch}\`
+   - Save the PR URL: \`echo \"https://github.com/...\" > .task-pr-url\`
+4. After the PR is created, run: \`touch .task-done\`"
+  fi
+
+  cat > "$worktree/TASK.md" << TASKEOF
+# Task: ${title}
+
+## Linear Issue
+- **ID:** ${identifier}
+- **URL:** ${url}
+- **Priority:** ${priority_label}
+
+## Project / Branch
+${task_project} / ${task_branch}
+
+## Description
+${description}
+
+## When done
+${when_done}
+TASKEOF
+
+  log "Wrote rich TASK.md to $worktree (task #$task_id, $identifier)"
+}
+
+# ── Configure Linear MCP in global Claude settings ───────────────────────────
+# Writes to ~/.claude/settings.json (never touches worktrees / git repos)
+
+inject_linear_mcp() {
+  [ "$MCP_ENABLED" = "true" ] || return 0
+  [ -n "$LINEAR_API_KEY" ] || return 0
+
+  local settings_file="$HOME/.claude/settings.json"
+  mkdir -p "$HOME/.claude"
+
+  # Check if already configured with the current key
+  if [ -f "$settings_file" ]; then
+    local existing_key
+    existing_key=$(jq -r '.mcpServers.linear.env.LINEAR_API_KEY // empty' "$settings_file" 2>/dev/null)
+    [ "$existing_key" = "$LINEAR_API_KEY" ] && return 0
+    local tmp
+    tmp=$(mktemp)
+    jq --arg key "$LINEAR_API_KEY" \
+      '.mcpServers.linear = {
+        "command": "npx",
+        "args": ["-y", "@linear/mcp"],
+        "env": {"LINEAR_API_KEY": $key}
+      }' "$settings_file" > "$tmp" && mv "$tmp" "$settings_file"
+  else
+    jq -n --arg key "$LINEAR_API_KEY" \
+      '{"mcpServers": {"linear": {"command": "npx", "args": ["-y", "@linear/mcp"], "env": {"LINEAR_API_KEY": $key}}}}' \
+      > "$settings_file"
+  fi
+
+  log "Configured Linear MCP in $settings_file"
+}
+
+# ── Linear state mutations ────────────────────────────────────────────────────
+
+set_issue_state() {
+  local issue_id="$1" state_id="$2" label="${3:-state}"
+
+  local query
+  query=$(jq -n --arg id "$issue_id" --arg state_id "$state_id" \
+    '{"query": "mutation($id: String!, $stateId: String!) { issueUpdate(id: $id, input: { stateId: $stateId }) { success } }",
+      "variables": {"id": $id, "stateId": $state_id}}')
+
+  local response
+  response=$(linear_api "$query") || return 1
+
+  local success
+  success=$(echo "$response" | jq -r '.data.issueUpdate.success // false' 2>/dev/null)
+  if [ "$success" = "true" ]; then
+    log "Set Linear issue $issue_id → $label"
+    return 0
+  else
+    log "WARNING: Failed to set $issue_id state ($label): $(echo "$response" | jq -c '.errors // .')"
+    return 1
+  fi
+}
+
+mark_in_progress() {
+  local issue_id="$1"
+  local in_progress_id
+  in_progress_id=$(get_state_field '.team_states.in_progress_id')
+  [ -n "$in_progress_id" ] || { log "WARNING: No in_progress state ID cached"; return 1; }
+  set_issue_state "$issue_id" "$in_progress_id" "In Progress"
+}
+
+mark_in_review() {
+  local issue_id="$1"
+  [ -n "$STATE_IN_REVIEW" ] || return 0
+  local state_id
+  state_id=$(get_state_id_by_name "$STATE_IN_REVIEW")
+  [ -n "$state_id" ] || { log "WARNING: No state found for '$STATE_IN_REVIEW'"; return 0; }
+  set_issue_state "$issue_id" "$state_id" "In Review"
+}
+
+mark_blocked() {
+  local issue_id="$1"
+  [ -n "$STATE_BLOCKED" ] || return 0
+  local state_id
+  state_id=$(get_state_id_by_name "$STATE_BLOCKED")
+  [ -n "$state_id" ] || { log "WARNING: No state found for '$STATE_BLOCKED'"; return 0; }
+  set_issue_state "$issue_id" "$state_id" "Blocked"
+}
+
+mark_ready() {
+  local issue_id="$1"
+  local state_id=""
+  if [ -n "$STATE_READY" ]; then
+    state_id=$(get_state_id_by_name "$STATE_READY")
+  fi
+  if [ -z "$state_id" ]; then
+    state_id=$(get_state_field '.team_states.todo_id')
+  fi
+  [ -n "$state_id" ] || { log "WARNING: No ready state ID found"; return 1; }
+  set_issue_state "$issue_id" "$state_id" "Ready"
+}
+
+post_comment() {
+  local issue_id="$1" body="$2"
+
+  local query
+  query=$(jq -n --arg id "$issue_id" --arg body "$body" \
+    '{"query": "mutation($id: String!, $body: String!) { commentCreate(input: { issueId: $id, body: $body }) { success } }",
+      "variables": {"id": $id, "body": $body}}')
+
+  local response
+  response=$(linear_api "$query") || return 1
+
+  local success
+  success=$(echo "$response" | jq -r '.data.commentCreate.success // false' 2>/dev/null)
+  if [ "$success" = "true" ]; then
+    log "Posted comment on Linear issue $issue_id"
+    return 0
+  else
+    log "WARNING: Failed to post comment on $issue_id: $(echo "$response" | jq -c '.errors // .')"
+    return 1
+  fi
+}
+
+close_issue() {
+  local issue_id="$1"
+  local done_id
+  done_id=$(get_state_field '.team_states.done_id')
+  [ -n "$done_id" ] || { log "WARNING: No done state ID cached"; return 1; }
+  set_issue_state "$issue_id" "$done_id" "Done"
+}
+
+# ── Sync task statuses back to Linear ────────────────────────────────────────
+
+sync_task_statuses() {
+  [ -f "$TASK_REGISTRY" ] || return 0
+  [ -f "$LINEAR_STATE" ] || return 0
+
+  # Get all Linear-sourced tasks (those with an entry in issue_to_task)
+  local issue_map
+  issue_map=$(jq -r '.issue_to_task // {}' "$LINEAR_STATE")
+
+  local issue_ids
+  issue_ids=$(echo "$issue_map" | jq -r 'keys[]' 2>/dev/null)
+  [ -n "$issue_ids" ] || return 0
+
+  while IFS= read -r issue_id; do
+    local task_id
+    task_id=$(echo "$issue_map" | jq -r --arg id "$issue_id" '.[$id]')
+    [ -n "$task_id" ] && [ "$task_id" != "null" ] || continue
+
+    # Skip dry-run tasks
+    [[ "$task_id" == dry-run-* ]] && continue
+
+    local task_status synced_status
+    task_status=$(jq -r --arg id "$task_id" '.tasks[] | select(.id == $id) | .status // empty' "$TASK_REGISTRY" 2>/dev/null)
+    synced_status=$(jq -r --arg id "$issue_id" '.linear_status_synced[$id] // empty' "$LINEAR_STATE" 2>/dev/null)
+
+    [ -n "$task_status" ] || continue
+
+    case "$task_status" in
+      running)
+        # First transition: mark In Progress, post session info comment, enrich worktree
+        if [ "$synced_status" != "in_progress" ] && [ "$synced_status" != "blocked" ]; then
+          mark_in_progress "$issue_id" || true
+
+          local session_name worktree branch
+          session_name=$(jq -r --arg id "$task_id" '.tasks[] | select(.id == $id) | .session // empty' "$TASK_REGISTRY" 2>/dev/null)
+          worktree=""
+          branch=""
+          if [ -n "$session_name" ] && [ "$session_name" != "null" ]; then
+            worktree=$(jq -r --arg s "$session_name" '.[$s].worktree // .[$s].path // empty' "$PORT_REGISTRY" 2>/dev/null)
+            branch=$(jq -r --arg s "$session_name" '.[$s].branch // empty' "$PORT_REGISTRY" 2>/dev/null)
+            if [ -n "$worktree" ] && [ -d "$worktree" ]; then
+              write_task_md "$task_id" "$worktree" || true
+              inject_linear_mcp || true
+            fi
+          fi
+
+          local hostname_val
+          hostname_val=$(hostname 2>/dev/null || echo "unknown")
+          local start_comment="🤖 Agent started on ${hostname_val}"
+          [ -n "$branch" ] && [ "$branch" != "null" ] && start_comment+=$'\nBranch: `'"${branch}"'`'
+          [ -n "$session_name" ] && [ "$session_name" != "null" ] && start_comment+=$'\nSession: `'"${session_name}"'`'
+          post_comment "$issue_id" "$start_comment" || true
+
+          local tmp="$LINEAR_STATE.tmp.$$"
+          jq --arg id "$issue_id" '.linear_status_synced[$id] = "in_progress"' \
+            "$LINEAR_STATE" > "$tmp" && mv "$tmp" "$LINEAR_STATE"
+          synced_status="in_progress"
+        fi
+
+        # Check .task-blocked file every cycle regardless of current synced state
+        local session_name2 worktree2
+        session_name2=$(jq -r --arg id "$task_id" '.tasks[] | select(.id == $id) | .session // empty' "$TASK_REGISTRY" 2>/dev/null)
+        worktree2=""
+        if [ -n "$session_name2" ] && [ "$session_name2" != "null" ]; then
+          worktree2=$(jq -r --arg s "$session_name2" '.[$s].worktree // .[$s].path // empty' "$PORT_REGISTRY" 2>/dev/null)
+        fi
+        if [ -n "$worktree2" ] && [ -d "$worktree2" ]; then
+          if [ -f "$worktree2/.task-blocked" ] && [ "$synced_status" != "blocked" ]; then
+            local reason
+            reason=$(cat "$worktree2/.task-blocked" 2>/dev/null || echo "")
+            mark_blocked "$issue_id" || true
+            local blocked_comment="🚫 Agent blocked"
+            [ -n "$reason" ] && blocked_comment+=": ${reason}"
+            post_comment "$issue_id" "$blocked_comment" || true
+            local tmp="$LINEAR_STATE.tmp.$$"
+            jq --arg id "$issue_id" '.linear_status_synced[$id] = "blocked"' \
+              "$LINEAR_STATE" > "$tmp" && mv "$tmp" "$LINEAR_STATE"
+          elif [ ! -f "$worktree2/.task-blocked" ] && [ "$synced_status" = "blocked" ]; then
+            mark_in_progress "$issue_id" || true
+            local tmp="$LINEAR_STATE.tmp.$$"
+            jq --arg id "$issue_id" '.linear_status_synced[$id] = "in_progress"' \
+              "$LINEAR_STATE" > "$tmp" && mv "$tmp" "$LINEAR_STATE"
+          fi
+        fi
+        ;;
+
+      pr-created)
+        if [ "$synced_status" != "pr_created" ]; then
+          mark_in_review "$issue_id" || true
+          local pr_url
+          pr_url=$(jq -r --arg id "$task_id" '.tasks[] | select(.id == $id) | .pr_url // empty' "$TASK_REGISTRY" 2>/dev/null)
+          if [ -n "$pr_url" ] && [ "$pr_url" != "null" ]; then
+            post_comment "$issue_id" "🔗 PR ready for review: $pr_url" || true
+          fi
+
+          local tmp="$LINEAR_STATE.tmp.$$"
+          jq --arg id "$issue_id" '.linear_status_synced[$id] = "pr_created"' \
+            "$LINEAR_STATE" > "$tmp" && mv "$tmp" "$LINEAR_STATE"
+        fi
+        ;;
+
+      failed)
+        if [ "$synced_status" != "failed" ]; then
+          mark_ready "$issue_id" || true
+          post_comment "$issue_id" "❌ Task failed or PR closed. Issue re-queued for review." || true
+
+          local tmp="$LINEAR_STATE.tmp.$$"
+          jq --arg id "$issue_id" '.linear_status_synced[$id] = "failed"' \
+            "$LINEAR_STATE" > "$tmp" && mv "$tmp" "$LINEAR_STATE"
+        fi
+        ;;
+
+      done)
+        if [ "$synced_status" != "done" ]; then
+          close_issue "$issue_id" || true
+
+          local tmp="$LINEAR_STATE.tmp.$$"
+          jq --arg id "$issue_id" '.linear_status_synced[$id] = "done"' \
+            "$LINEAR_STATE" > "$tmp" && mv "$tmp" "$LINEAR_STATE"
+        fi
+        ;;
+    esac
+  done <<< "$issue_ids"
+}
+
+# ── Single pass ───────────────────────────────────────────────────────────────
+
+run_once() {
+  load_config
+  init_state
+  get_team_states || true
+
+  local now
+  now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+  # Fetch and process new issues
+  local issues_json
+  issues_json=$(fetch_new_issues) || {
+    log "ERROR: Failed to fetch issues. Will retry next cycle."
+    update_state_field '.last_error' "fetch failed at $now"
+    return 0
+  }
+
+  local issue_count
+  issue_count=$(echo "$issues_json" | jq 'length')
+  log "Found $issue_count new issue(s)"
+
+  local new_tasks=0
+  if [ "$issue_count" -gt 0 ]; then
+    local i=0
+    while [ $i -lt "$issue_count" ]; do
+      local issue
+      issue=$(echo "$issues_json" | jq -c ".[$i]")
+      local issue_id
+      issue_id=$(echo "$issue" | jq -r '.id')
+      local identifier
+      identifier=$(echo "$issue" | jq -r '.identifier')
+
+      # Check if already processed (local state)
+      local existing_task
+      existing_task=$(jq -r --arg id "$issue_id" '.issue_to_task[$id] // empty' "$LINEAR_STATE" 2>/dev/null)
+      if [ -n "$existing_task" ]; then
+        log "Issue $identifier already tracked (task #$existing_task). Skipping."
+        i=$((i + 1))
+        continue
+      fi
+
+      # Multi-user: check global claimed file before processing
+      if is_claimed "$issue_id"; then
+        log "Issue $identifier already claimed by another user. Skipping."
+        i=$((i + 1))
+        continue
+      fi
+
+      # Create the task
+      local task_id
+      task_id=$(create_task_from_issue "$issue") || {
+        log "WARNING: Failed to create task for $identifier. Skipping."
+        i=$((i + 1))
+        continue
+      }
+
+      # Atomically claim the issue (no-op if dry-run)
+      if [ "$DRY_RUN" != true ]; then
+        claim_issue "$issue_id" "$task_id" || {
+          log "WARNING: Race condition — $identifier was claimed by another user. Removing local task."
+          # Remove the task we just added
+          local tmp="$TASK_REGISTRY.tmp.$$"
+          jq --arg id "$task_id" \
+            '.tasks = [.tasks[] | select(.id != $id)]' \
+            "$TASK_REGISTRY" > "$tmp" && mv "$tmp" "$TASK_REGISTRY" || true
+          rm -f "$LINEAR_CONTEXT_DIR/${task_id}.json"
+          # Remove from state
+          local stmp="$LINEAR_STATE.tmp.$$"
+          jq --arg id "$issue_id" 'del(.issue_to_task[$id])' \
+            "$LINEAR_STATE" > "$stmp" && mv "$stmp" "$LINEAR_STATE" || true
+          i=$((i + 1))
+          continue
+        }
+      fi
+
+      log "Issue $identifier → task #$task_id"
+      new_tasks=$((new_tasks + 1))
+      i=$((i + 1))
+    done
+  fi
+
+  # Update last_sync timestamp
+  if [ "$DRY_RUN" != true ]; then
+    update_state_field '.last_sync' "$now"
+  fi
+
+  # Sync task statuses back to Linear
+  sync_task_statuses || true
+
+  # Kick the task runner immediately for any new tasks so they start without
+  # waiting for the task-runner daemon's next poll cycle (or if it's not running).
+  if [ "$new_tasks" -gt 0 ] && [ "$DRY_RUN" != true ]; then
+    log "Triggering task runner for $new_tasks new task(s)..."
+    dev-task-runner --once >> "$LOG_FILE" 2>&1 || true
+  fi
+
+  log "Pass complete."
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+case "${1:---once}" in
+  --once)
+    if [ "${2:-}" = "--dry-run" ]; then
+      DRY_RUN=true
+      log "Running single pass (DRY-RUN)..."
+    else
+      log "Running single pass..."
+    fi
+    run_once
+    ;;
+  --watch)
+    load_config  # load once to get POLL_INTERVAL before the loop
+    log "Starting watch mode (polling every ${POLL_INTERVAL}s)..."
+    while true; do
+      run_once || log "WARNING: run_once failed, continuing..."
+      sleep "$POLL_INTERVAL"
+    done
+    ;;
+  *)
+    echo "Usage: dev-linear [--once [--dry-run]|--watch]"
+    exit 1
+    ;;
+esac
