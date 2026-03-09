@@ -477,7 +477,7 @@ check_reviews() {
 _An automated code review has been posted on the PR._"
 
       # Kill the review session
-      dev kill "$review_session" -f 2>&1 | tail -3 >> "$LOG_FILE" || true
+      dev kill "$review_session" --force 2>&1 | tail -3 >> "$LOG_FILE" || true
       log "Review session $review_session cleaned up"
     fi
   done <<< "$review_tasks"
@@ -516,7 +516,7 @@ check_merged() {
       review_session=$(task_field "$id" "review_session")
       if [ -n "$review_session" ] && [ "$review_session" != "null" ] && tmux has-session -t "$review_session" 2>/dev/null; then
         log "Killing review session $review_session for completed task $id"
-        dev kill "$review_session" -f 2>&1 | tail -3 >> "$LOG_FILE" || true
+        dev kill "$review_session" --force 2>&1 | tail -3 >> "$LOG_FILE" || true
       fi
 
       local now
@@ -560,7 +560,7 @@ case "${1:---once}" in
     log "Starting watch mode (polling every 60s)..."
     while true; do
       (
-        flock -n 200 || { log "Skipping cycle — another instance is running."; true; }
+        flock -n 200 || { log "Skipping cycle — another instance is running."; exit 0; }
         run_once
       ) 200>"$LOCK_FILE"
       sleep 60

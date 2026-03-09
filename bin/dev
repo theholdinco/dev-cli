@@ -4920,7 +4920,7 @@ EOF
         fi
       fi
       echo ""
-      if [ -f "$service_dir/dev-web.service" ]; then
+      if [ -f "$service_dir/dev-web.service" ] || [ -f "$service_dir/dev-linear.service" ]; then
         echo -e "  Installed: ${GREEN}yes${NC} (auto-start on boot)"
       else
         echo -e "  Installed: ${RED}no${NC} (run 'dev services install')"
@@ -4937,7 +4937,7 @@ EOF
       esac
       ;;
     *)
-      echo "Usage: dev services <install|uninstall|start|stop|restart|status|logs [web|bot]>"
+      echo "Usage: dev services <install|uninstall|start|stop|restart|status|logs [web|bot|task-runner|linear]>"
       ;;
   esac
 }
@@ -6400,7 +6400,7 @@ cmd_linear() {
       echo -e "  ${BOLD}${CYAN}Linear Integration${NC}"
       echo ""
 
-      if ! jq -e '.linear' "$GLOBAL_CONFIG" &>/dev/null 2>&1; then
+      if ! jq -e '.linear' "$GLOBAL_CONFIG" &>/dev/null; then
         echo -e "  ${YELLOW}Not configured.${NC} Run: dev linear setup"
         echo ""
         return
@@ -6775,7 +6775,14 @@ cmd_help() {
     dev services stop                       Stop all services
     dev services restart                    Restart all services
     dev services status                     Show service status
-    dev services logs [web|bot|task-runner]  Follow service logs
+    dev services logs [web|bot|task-runner|linear]  Follow service logs
+
+  LINEAR INTEGRATION
+    dev linear setup                        Configure Linear API key, team, label, and filters
+    dev linear status                       Show current Linear configuration
+    dev linear run                          Run Linear poller (single pass)
+    dev linear watch                        Run Linear poller (watch mode)
+    dev linear test                         Test Linear API connectivity
 
   DEVCONTAINER (sandboxed agent sessions)
     --container                             Run agent inside a devcontainer
