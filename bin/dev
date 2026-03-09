@@ -5969,7 +5969,7 @@ cmd_scaffold() {
 }
 
 cmd_review() {
-  local session_or_pr="${2:-}" yolo=false fix=""
+  local session_or_pr="${2:-}" yolo=false fix="" local_project=""
   shift || true
   shift || true
 
@@ -5979,11 +5979,12 @@ cmd_review() {
       --yolo) yolo=true; shift ;;
       --fix) fix=true; shift ;;
       --no-fix) fix=false; shift ;;
+      --project) local_project="${2:-}"; shift 2 ;;
       *) shift ;;
     esac
   done
 
-  [ -z "$session_or_pr" ] && die "Usage: dev review <session|pr-url> [--yolo] [--fix|--no-fix]"
+  [ -z "$session_or_pr" ] && die "Usage: dev review <session|pr-url> [--yolo] [--fix|--no-fix] [--project <local-project>]"
 
   # Resolve auto_fix from global config if not set by flag
   if [ -z "$fix" ]; then
@@ -6000,6 +6001,8 @@ cmd_review() {
       || die "Could not fetch PR info from $pr_url"
     branch=$(gh pr view "$pr_url" --json headRefName --jq '.headRefName' 2>/dev/null) \
       || die "Could not fetch branch from $pr_url"
+    # Allow overriding the local project name (e.g. GitHub repo is 'dev-cli' but local project is 'cli')
+    [ -n "$local_project" ] && project="$local_project"
   else
     # Argument is a session name — resolve it
     local match
@@ -6319,6 +6322,7 @@ cmd_help() {
     dev review <session|pr-url> --yolo      Skip agent permissions
     dev review <session|pr-url> --fix       Review and fix issues, opening a fix PR
     dev review <session|pr-url> --no-fix    Review only (override auto_fix config)
+    dev review <pr-url> --project <name>    Use local project name (if different from GitHub repo name)
 
   UTILITIES
     dev ports                               Show port allocation table
