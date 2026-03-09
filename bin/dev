@@ -4956,13 +4956,38 @@ cmd_task() {
         esac
       done
 
-      [ -n "$project" ] || die "Usage: dev task add <project> [branch] \"description\" [--from <base>] [--private] [--plan]"
-
       # If only two positional args given (project + description, no branch),
       # treat second arg as description and auto-generate branch name
       if [ -n "$branch" ] && [ -z "$description" ]; then
         description="$branch"
         branch=""
+      fi
+
+      [ -n "$project" ] || die "Usage: dev task add <project> [branch] \"description\" [--from <base>] [--private] [--plan]"
+
+      # If the first arg is not a valid project and no description was given,
+      # the user likely entered only the description — prompt them to select a project
+      if ! [ -f "$CONFIG_DIR/projects/${project}.json" ] && [ -z "$description" ]; then
+        description="$project"
+        project=""
+
+        local available_projects
+        available_projects=$(ls "$CONFIG_DIR/projects/" 2>/dev/null | sed 's/\.json$//' | sort)
+
+        if [ -z "$available_projects" ]; then
+          die "No projects configured. Run 'dev setup' first."
+        fi
+
+        echo "Available projects:"
+        local i=1
+        while IFS= read -r p; do
+          echo "  $i) $p"
+          i=$((i + 1))
+        done <<< "$available_projects"
+        echo ""
+        read -rp "Select project number: " choice
+        project=$(echo "$available_projects" | sed -n "${choice}p")
+        [ -z "$project" ] && die "Invalid selection."
       fi
 
       [ -n "$description" ] || die "Usage: dev task add <project> [branch] \"description\" [--from <base>] [--private] [--plan]"
