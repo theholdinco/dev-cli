@@ -3705,9 +3705,10 @@ cmd_yolo() {
   [ -z "$container_id" ] && env_prefix=$(build_env_prefix)
 
   # Build the new agent command with yolo + continue to resume conversation
+  # Pass "continue" as the prompt so Claude immediately resumes work after restarting
   local claude_flags=" --dangerously-skip-permissions --continue"
   local agent_cmd
-  agent_cmd=$(build_agent_cmd "claude" "$worktree_path" "$container_id" "$claude_flags")
+  agent_cmd=$(build_agent_cmd "claude" "$worktree_path" "$container_id" "$claude_flags" " \"continue\"")
 
   # Kill current process in agent window and restart with yolo + resume
   tmux respawn-window -t "$match:agent" -k "${env_prefix}${agent_cmd}"
