@@ -55,7 +55,13 @@ get_user_max_sessions() {
 is_admin() {
     local username="$1"
     if ! has_user_registry; then
-        return 0  # single-user mode: everyone is admin
+        return 0  # single-user mode: no registry
+    fi
+    # Empty registry = setup mode, treat everyone as admin
+    local user_count
+    user_count=$(jq '.users | length' "$USERS_FILE" 2>/dev/null || echo "0")
+    if [[ "$user_count" -eq 0 ]]; then
+        return 0
     fi
     local role
     role=$(get_user_role "$username") || return 1
