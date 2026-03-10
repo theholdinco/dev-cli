@@ -85,7 +85,7 @@ set_user_field() {
     tmp=$(mktemp)
     (flock 200
         jq --arg u "$username" --arg f "$field" --arg v "$value" \
-            '.users[$u][$f] = $v' "$USERS_FILE" > "$tmp" && mv "$tmp" "$USERS_FILE"
+            '.users[$u][$f] = $v' "$USERS_FILE" > "$tmp" && cp "$tmp" "$USERS_FILE" && rm -f "$tmp"
     ) 200>"$USERS_FILE.lock"
 }
 
@@ -97,7 +97,7 @@ set_user_field_raw() {
     tmp=$(mktemp)
     (flock 200
         jq --arg u "$username" --arg f "$field" --argjson v "$value" \
-            '.users[$u][$f] = $v' "$USERS_FILE" > "$tmp" && mv "$tmp" "$USERS_FILE"
+            '.users[$u][$f] = $v' "$USERS_FILE" > "$tmp" && cp "$tmp" "$USERS_FILE" && rm -f "$tmp"
     ) 200>"$USERS_FILE.lock"
 }
 
@@ -113,7 +113,7 @@ register_user() {
     (flock 200
         jq --arg u "$username" --arg e "$email" --arg r "$role" --arg t "$now" \
             '.users[$u] = {"tailscale_email": $e, "role": $r, "created": $t, "status": "active", "max_sessions": 8, "onboarded": false}' \
-            "$USERS_FILE" > "$tmp" && mv "$tmp" "$USERS_FILE"
+            "$USERS_FILE" > "$tmp" && cp "$tmp" "$USERS_FILE" && rm -f "$tmp"
     ) 200>"$USERS_FILE.lock"
 }
 
@@ -123,7 +123,7 @@ unregister_user() {
     local tmp
     tmp=$(mktemp)
     (flock 200
-        jq --arg u "$username" 'del(.users[$u])' "$USERS_FILE" > "$tmp" && mv "$tmp" "$USERS_FILE"
+        jq --arg u "$username" 'del(.users[$u])' "$USERS_FILE" > "$tmp" && cp "$tmp" "$USERS_FILE" && rm -f "$tmp"
     ) 200>"$USERS_FILE.lock"
 }
 

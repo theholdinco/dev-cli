@@ -465,9 +465,10 @@ if [ -f "$_USERS_FILE" ]; then
     jq --arg u "$USER" --arg t "$_now" \
       '.users[$u] = {"tailscale_email": "", "role": "admin", "created": $t, "status": "active", "max_sessions": 8, "onboarded": false}' \
       "$_USERS_FILE" > "$_tmp" \
-      && sudo mv "$_tmp" "$_USERS_FILE" \
+      && sudo cp "$_tmp" "$_USERS_FILE" \
       && sudo chown ":devs" "$_USERS_FILE" \
-      && sudo chmod g+w "$_USERS_FILE"
+      && sudo chmod g+w "$_USERS_FILE" \
+      && rm -f "$_tmp"
     log "$USER registered as admin. Set your Tailscale email with:"
     info "  dev admin add-user $USER --tailscale-email your@email.com --role admin"
   else
