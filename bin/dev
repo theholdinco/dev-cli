@@ -3674,6 +3674,47 @@ cmd_restart() {
   log "Session '$match' restarted with $agents"
 }
 
+cmd_yolo() {
+  local name="${2:-}"
+  [ -z "$name" ] && die "Usage: dev yolo <session>"
+
+  local match
+  match=$(jq -r "keys[] | select(contains(\"$name\"))" "$PORT_REGISTRY" | head -1)
+  [ -z "$match" ] && die "No session matching '$name'"
+
+  # Verify the tmux session is alive
+  tmux has-session -t "$match" 2>/dev/null || die "No live tmux session for '$match' (run 'dev gc' to clean up)"
+
+  # Verify agent is claude
+  local agents primary_agent
+  agents=$(get_session_agents "$match")
+  primary_agent=$(echo "$agents" | cut -d',' -f1)
+  [ "$primary_agent" != "claude" ] && die "Yolo mode only supported for Claude sessions (agent: $primary_agent)"
+
+  local worktree_path container_id
+  worktree_path=$(get_session_field "$match" "path")
+  container_id=$(get_session_field "$match" "container_id")
+
+  info "Enabling yolo mode for session '$match'..."
+
+  # Suppress the skip-permissions confirmation dialog
+  [ -z "$container_id" ] && ensure_claude_skip_prompt
+
+  # Build env prefix for secrets
+  local env_prefix=""
+  [ -z "$container_id" ] && env_prefix=$(build_env_prefix)
+
+  # Build the new agent command with yolo + continue to resume conversation
+  local claude_flags=" --dangerously-skip-permissions --continue"
+  local agent_cmd
+  agent_cmd=$(build_agent_cmd "claude" "$worktree_path" "$container_id" "$claude_flags")
+
+  # Kill current process in agent window and restart with yolo + resume
+  tmux respawn-window -t "$match:agent" -k "${env_prefix}${agent_cmd}"
+
+  log "Session '$match' is now in yolo mode — claude resumed with --dangerously-skip-permissions"
+}
+
 cmd_img() {
   local subcmd="${2:-ls}"
   local IMAGES_DIR="$HOME/images"
@@ -6669,6 +6710,7 @@ cmd_help() {
     dev kill --project <name>               Kill all sessions for a project
     dev kill <session> -f|--force           Skip confirmation prompts
     dev restart <session>                   Restart tmux + agent (keep worktree)
+    dev yolo <session>                      Re-launch Claude in yolo mode, resuming the conversation
     dev status <session>                    Show detailed session health
     dev send <session> <prompt>             Send text to agent pane
     dev send <session> --file <path>        Send file contents to agent
@@ -6912,6 +6954,7 @@ case "${1:-help}" in
   update)    cmd_update "${2:-}" ;;
   status)    cmd_status "$@" ;;
   restart)   cmd_restart "$@" ;;
+  yolo)      cmd_yolo "$@" ;;
   send)      cmd_send "$@" ;;
   diff)      cmd_diff "$@" ;;
   sync)      cmd_sync "$@" ;;

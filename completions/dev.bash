@@ -18,10 +18,10 @@ _dev() {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
   # All available commands
-  local commands="setup new ls attach kill hub dashboard ports logs url supabase pr pr-start shell worktree img projects update help status restart send diff sync gc rename private template config agent stats doctor web bot services notify mobile m task ask ghost scaffold review vibes fortune lenny linear"
+  local commands="setup new ls attach kill hub dashboard ports logs url supabase pr pr-start shell worktree img projects update help status restart yolo send diff sync gc rename private template config agent stats doctor web bot services notify mobile m task ask ghost scaffold review vibes fortune lenny linear"
 
   # Commands that take a session name as second argument
-  local session_cmds="attach kill logs url supabase shell pr status restart send diff sync rename private review"
+  local session_cmds="attach kill logs url supabase shell pr status restart yolo send diff sync rename private review"
 
   # Commands that take a project name as second argument
   local project_cmds="new template worktree ask pr-start"
