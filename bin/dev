@@ -3590,7 +3590,46 @@ cmd_doctor() {
   fi
   echo ""
 
+  # --- Security checks (multi-user mode only) ---
+  if type has_user_registry &>/dev/null && has_user_registry; then
+      echo ""
+      echo -e "  ${BOLD}Security:${NC}"
+
+      if is_user_registered "$USER"; then
+          local role status
+          role=$(get_user_role "$USER")
+          status=$(get_user_status "$USER")
+          echo -e "  ${GREEN}✓${NC} User registration: $USER (role: $role, status: $status)"
+          ok=$((ok + 1))
+      else
+          echo -e "  ${RED}✗${NC} User registration: $USER not in registry"
+          fail=$((fail + 1))
+      fi
+
+      if command -v authbind &>/dev/null; then
+          echo -e "  ${GREEN}✓${NC} Port isolation: authbind installed"
+          ok=$((ok + 1))
+      else
+          echo -e "  ${YELLOW}⚠${NC} Port isolation: authbind not installed"
+          warn_count=$((warn_count + 1))
+      fi
+
+      if [[ -f /usr/local/bin/validate-tailscale-identity ]]; then
+          echo -e "  ${GREEN}✓${NC} SSH binding: identity validation installed"
+          ok=$((ok + 1))
+      else
+          echo -e "  ${YELLOW}⚠${NC} SSH binding: not configured"
+          warn_count=$((warn_count + 1))
+      fi
+
+      local current max
+      current=$(count_user_sessions "$USER")
+      max=$(get_user_max_sessions "$USER")
+      echo -e "  ${GREEN}✓${NC} Session limit: $current/$max sessions"
+  fi
+
   # Summary
+  echo ""
   echo -e "  ─────────────────────────────────"
   echo -e "  ${GREEN}$ok passed${NC}  ${YELLOW}$warn_count warnings${NC}  ${RED}$fail failed${NC}"
   echo ""
@@ -6739,6 +6778,113 @@ cmd_lenny() {
   echo ""
   echo -e "  ${lennys[$idx]}"
   echo ""
+}
+
+cmd_setup_account() {
+    echo -e "${BOLD}Welcome to dev-cli! Let's set up your account.${NC}"
+    echo ""
+
+    # Step 1: Check user registration
+    if type is_user_registered &>/dev/null && has_user_registry; then
+        if ! is_user_registered "$USER"; then
+            die "Your account ($USER) is not registered. Ask your admin to run: dev admin add-user $USER --tailscale-email <your-email>"
+        fi
+
+        local status
+        status=$(get_user_status "$USER")
+        if [[ "$status" != "active" ]]; then
+            die "Your account is $status. Contact your admin."
+        fi
+
+        local email
+        email=$(get_user_field "$USER" "tailscale_email")
+        log "Account registered as: $USER <$email>"
+    else
+        info "Running in single-user mode (no user registry)"
+    fi
+
+    # Step 2: Tailscale verification
+    echo ""
+    info "Checking Tailscale..."
+    if command -v tailscale &>/dev/null; then
+        if tailscale status --self &>/dev/null; then
+            local ts_ip
+            ts_ip=$(tailscale ip -4 2>/dev/null || echo "unknown")
+            log "Tailscale connected (IP: $ts_ip)"
+        else
+            warn "Tailscale is installed but not connected."
+            echo "  Run: sudo tailscale up"
+            echo "  Then re-run: dev setup-account"
+            return 1
+        fi
+    else
+        warn "Tailscale not installed. Ask your admin for setup instructions."
+    fi
+
+    # Step 3: GitHub auth
+    echo ""
+    info "Checking GitHub CLI..."
+    if command -v gh &>/dev/null; then
+        if gh auth status &>/dev/null 2>&1; then
+            local gh_user
+            gh_user=$(gh api user --jq '.login' 2>/dev/null || echo "unknown")
+            log "GitHub authenticated as: $gh_user"
+        else
+            warn "GitHub CLI not authenticated."
+            echo "  Run: gh auth login"
+            echo ""
+            read -rp "Would you like to authenticate now? [Y/n] " answer
+            if [[ "${answer:-y}" =~ ^[Yy] ]]; then
+                gh auth login
+            fi
+        fi
+    else
+        warn "GitHub CLI (gh) not installed."
+    fi
+
+    # Step 4: Claude auth
+    echo ""
+    info "Checking Claude Code..."
+    if command -v claude &>/dev/null; then
+        # Check if claude has valid auth
+        if [[ -f "$HOME/.config/dev-cli/secrets.env" ]]; then
+            if grep -q "CLAUDE_CODE_OAUTH_TOKEN\|ANTHROPIC_API_KEY" "$HOME/.config/dev-cli/secrets.env" 2>/dev/null; then
+                log "Claude Code credentials found in secrets.env"
+            else
+                warn "No Claude credentials in secrets.env"
+                echo "  Run: claude login"
+                echo ""
+                read -rp "Would you like to authenticate now? [Y/n] " answer
+                if [[ "${answer:-y}" =~ ^[Yy] ]]; then
+                    claude login
+                fi
+            fi
+        else
+            warn "No secrets.env found."
+        fi
+    else
+        warn "Claude Code not installed."
+        echo "  Run: curl -fsSL https://cli.claude.ai/install.sh | sh"
+    fi
+
+    # Step 5: Run doctor
+    echo ""
+    info "Running health check..."
+    cmd_doctor
+
+    # Step 6: Mark as onboarded
+    if type set_user_field_raw &>/dev/null && has_user_registry; then
+        set_user_field_raw "$USER" "onboarded" "true"
+    fi
+
+    echo ""
+    log "Account setup complete!"
+    echo ""
+    echo "Quick start:"
+    echo "  dev init <project>     Set up a project for the first time"
+    echo "  dev new <branch>       Start a new session"
+    echo "  dev hub                Launch the interactive dashboard"
+    echo "  dev help               See all commands"
 }
 
 cmd_help() {
