@@ -1575,7 +1575,12 @@ cmd_new() {
   local name
   name=$(session_name "$project" "$branch")
 
-  # Check session limit
+  # Check user status and session limit
+  if type get_user_status &>/dev/null && type has_user_registry &>/dev/null && has_user_registry; then
+    local _status
+    _status=$(get_user_status "$USER" 2>/dev/null || echo "active")
+    [[ "$_status" == "active" ]] || die "Your account is $_status. Contact your admin."
+  fi
   if type can_create_session &>/dev/null && ! can_create_session "$USER"; then
     local _max _current
     _max=$(get_user_max_sessions "$USER")
@@ -2316,6 +2321,14 @@ cmd_kill() {
       rm -rf "$worktree_path"
       log "Removed ghost directory"
     fi
+    if command -v authbind &>/dev/null && type cleanup_authbind_ports &>/dev/null; then
+      cleanup_authbind_ports \
+        "$(get_session_field "$name" "ports.frontend" 2>/dev/null || true)" \
+        "$(get_session_field "$name" "ports.backend" 2>/dev/null || true)" \
+        "$(get_session_field "$name" "ports.supa_api" 2>/dev/null || true)" \
+        "$(get_session_field "$name" "ports.supa_db" 2>/dev/null || true)" \
+        "$(get_session_field "$name" "ports.supa_studio" 2>/dev/null || true)"
+    fi
     unregister_session "$name"
     type audit_log &>/dev/null && audit_log "$USER" "session.kill" "$name" '{}'
     log "Session '$name' fully cleaned up"
@@ -2357,6 +2370,14 @@ cmd_kill() {
 
       rm -rf "$worktree_path"
       log "Removed scaffold directory"
+    fi
+    if command -v authbind &>/dev/null && type cleanup_authbind_ports &>/dev/null; then
+      cleanup_authbind_ports \
+        "$(get_session_field "$name" "ports.frontend" 2>/dev/null || true)" \
+        "$(get_session_field "$name" "ports.backend" 2>/dev/null || true)" \
+        "$(get_session_field "$name" "ports.supa_api" 2>/dev/null || true)" \
+        "$(get_session_field "$name" "ports.supa_db" 2>/dev/null || true)" \
+        "$(get_session_field "$name" "ports.supa_studio" 2>/dev/null || true)"
     fi
     unregister_session "$name"
     type audit_log &>/dev/null && audit_log "$USER" "session.kill" "$name" '{}'
@@ -7196,9 +7217,9 @@ case "${1:-help}" in
   vibes)     cmd_vibes ;;
   fortune)   cmd_fortune ;;
   lenny)     cmd_lenny ;;
-  admin)          shift; bash "$(dirname "$0")/dev-admin" "$@" ;;
+  admin)          shift; bash "$_dev_script_dir/dev-admin" "$@" ;;
   setup-account)  cmd_setup_account "$@" ;;
-  --version|-v)   echo "dev-cli $(cat "$(dirname "$0")/.dev-version" 2>/dev/null || echo "unknown")"; exit 0 ;;
+  --version|-v)   echo "dev-cli $(cat "$_dev_script_dir/.dev-version" 2>/dev/null || echo "unknown")"; exit 0 ;;
   help|-h|--help) cmd_help ;;
   *)         die "Unknown command: $1. Run 'dev help' for usage." ;;
 esac

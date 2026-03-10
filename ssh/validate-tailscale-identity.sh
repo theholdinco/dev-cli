@@ -13,7 +13,7 @@ USERS_FILE="/etc/dev-cli/users.json"
 
 # If no user registry, allow all (single-user mode)
 if [[ ! -f "$USERS_FILE" ]]; then
-    cat "$HOME/.ssh/authorized_keys" 2>/dev/null || true
+    cat "/home/$USERNAME/.ssh/authorized_keys" 2>/dev/null || true
     exit 0
 fi
 

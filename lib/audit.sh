@@ -35,9 +35,15 @@ audit_read() {
         esac
     done
 
-    local filter="."
-    [[ -n "$user" ]] && filter="$filter | select(.actor == \"$user\")"
-    [[ -n "$action" ]] && filter="$filter | select(.action | startswith(\"$action\"))"
+    local filter="." jq_args=()
+    if [[ -n "$user" ]]; then
+        filter="$filter | select(.actor == \$u)"
+        jq_args+=(--arg u "$user")
+    fi
+    if [[ -n "$action" ]]; then
+        filter="$filter | select(.action | startswith(\$a))"
+        jq_args+=(--arg a "$action")
+    fi
 
     if [[ -n "$last" ]]; then
         local seconds=0
@@ -56,5 +62,5 @@ audit_read() {
     fi
 
     [[ -f "$AUDIT_LOG" ]] || return 0
-    jq -c "$filter" "$AUDIT_LOG"
+    jq -c "${jq_args[@]}" "$filter" "$AUDIT_LOG"
 }

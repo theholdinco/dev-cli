@@ -151,7 +151,9 @@ cmd_admin_add_user() {
     echo ""
     echo "1. Install Tailscale: https://tailscale.com/download"
     echo "2. Join the tailnet (ask your admin for the invite link)"
-    echo "3. SSH in: ssh $username@$(hostname)"
+    local _ts_host
+    _ts_host=$(tailscale status --self 2>/dev/null | awk 'NR==1{print $2}' || hostname)
+    echo "3. SSH in: ssh $username@$_ts_host"
     echo "4. Change your password when prompted"
     echo "5. Run: dev setup-account"
     echo "──────────────────────────────────────"
@@ -276,10 +278,7 @@ cmd_admin_set_limit() {
     is_user_registered "$username" || die "User '$username' is not registered"
     [[ "$max_sessions" =~ ^[0-9]+$ ]] || die "max-sessions must be a number"
 
-    # jq needs numeric value, use argjson
-    local tmp
-    tmp=$(mktemp)
-    jq --arg u "$username" --argjson m "$max_sessions" '.users[$u].max_sessions = $m' "$USERS_FILE" > "$tmp" && mv "$tmp" "$USERS_FILE"
+    set_user_field_raw "$username" "max_sessions" "$max_sessions"
     log "User '$username' max sessions set to $max_sessions"
     audit_log "$USER" "admin.set-limit" "$username" "$(jq -nc --argjson m "$max_sessions" '{max_sessions:$m}')"
 }
@@ -287,6 +286,7 @@ cmd_admin_set_limit() {
 # --- Monitoring Commands ---
 
 cmd_admin_status() {
+    require_admin || exit 1
     echo -e "${BOLD}System Status${NC}"
     echo "═══════════════════════════════════"
 
@@ -326,6 +326,7 @@ cmd_admin_status() {
 }
 
 cmd_admin_audit() {
+    require_admin || exit 1
     local args=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -344,6 +345,7 @@ cmd_admin_audit() {
 }
 
 cmd_admin_stale_sessions() {
+    require_admin || exit 1
     local older_than="7d"
     while [[ $# -gt 0 ]]; do
         case "$1" in
