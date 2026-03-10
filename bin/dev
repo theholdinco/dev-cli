@@ -3821,7 +3821,7 @@ cmd_projects() {
 }
 
 cmd_update() {
-  local GITHUB_REPO="Patagon-Markets/dev-cli"
+  local GITHUB_REPO="theholdinco/dev-cli"
   local BRANCH="${1:-main}"
   
   if ! command -v gh &>/dev/null; then
