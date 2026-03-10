@@ -7,7 +7,7 @@ AUDIT_LOG="${AUDIT_LOG:-/etc/dev-cli/audit.log}"
 # Write a JSON-lines audit entry
 # Usage: audit_log <actor> <action> [target] [details_json]
 audit_log() {
-    local actor="$1" action="$2" target="${3:-}" details="${4:-{}}"
+    local actor="$1" action="$2" target="${3:-}" details="${4:-}"
     local ts
     ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     [[ -z "$details" || "$details" == "" ]] && details='{}'
