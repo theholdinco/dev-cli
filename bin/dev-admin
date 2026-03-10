@@ -110,9 +110,18 @@ cmd_admin_add_user() {
     local user_home
     user_home=$(eval echo "~$username")
     sudo -u "$username" mkdir -p "$user_home/.local/bin" "$user_home/.config/dev-cli"
-    sudo cp "$SCRIPT_DIR/dev" "$SCRIPT_DIR/dev-hub" "$SCRIPT_DIR/dev-admin" "$user_home/.local/bin/"
+    # Only copy if source and destination differ (skip when adding yourself)
+    local dst_bin
+    dst_bin=$(realpath "$user_home/.local/bin" 2>/dev/null || echo "$user_home/.local/bin")
+    if [[ "$(realpath "$SCRIPT_DIR" 2>/dev/null || echo "$SCRIPT_DIR")" != "$dst_bin" ]]; then
+        sudo cp "$SCRIPT_DIR/dev" "$SCRIPT_DIR/dev-hub" "$SCRIPT_DIR/dev-admin" "$user_home/.local/bin/"
+    fi
     sudo mkdir -p "$user_home/.local/lib/dev-cli"
-    sudo cp "$LIB_DIR/auth.sh" "$LIB_DIR/audit.sh" "$user_home/.local/lib/dev-cli/"
+    local dst_lib
+    dst_lib=$(realpath "$user_home/.local/lib/dev-cli" 2>/dev/null || echo "$user_home/.local/lib/dev-cli")
+    if [[ "$(realpath "$LIB_DIR" 2>/dev/null || echo "$LIB_DIR")" != "$dst_lib" ]]; then
+        sudo cp "$LIB_DIR/auth.sh" "$LIB_DIR/audit.sh" "$user_home/.local/lib/dev-cli/"
+    fi
     sudo chown -R "$username:$username" "$user_home/.local/"
 
     # Install Claude Code
