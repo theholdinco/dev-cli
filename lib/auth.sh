@@ -81,6 +81,7 @@ require_admin() {
 # Usage: set_user_field <username> <field> <value>
 set_user_field() {
     local username="$1" field="$2" value="$3"
+    [[ -s "$USERS_FILE" ]] || return 1
     local tmp
     tmp=$(mktemp)
     (flock 200
@@ -93,6 +94,7 @@ set_user_field() {
 # Usage: set_user_field_raw <username> <field> <json_value>
 set_user_field_raw() {
     local username="$1" field="$2" value="$3"
+    [[ -s "$USERS_FILE" ]] || return 1
     local tmp
     tmp=$(mktemp)
     (flock 200
@@ -107,7 +109,10 @@ register_user() {
     local username="$1" email="$2" role="${3:-user}"
     local now
     now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    [[ -f "$USERS_FILE" ]] || echo '{"users":{}}' > "$USERS_FILE"
+    # Initialize if missing or empty (jq on 0-byte file exits 0 with no output)
+    if [[ ! -f "$USERS_FILE" ]] || [[ ! -s "$USERS_FILE" ]]; then
+        echo '{"users":{}}' > "$USERS_FILE"
+    fi
     local tmp
     tmp=$(mktemp)
     (flock 200
