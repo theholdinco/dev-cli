@@ -3712,6 +3712,11 @@ cmd_yolo() {
   # Kill current process in agent window and restart with yolo + resume
   tmux respawn-window -t "$match:agent" -k "${env_prefix}${agent_cmd}"
 
+  # Wait for Claude to start, then send 'continue' so it resumes work
+  sleep 3
+  tmux send-keys -t "$match:agent" -l "continue"
+  tmux send-keys -t "$match:agent" Enter
+
   log "Session '$match' is now in yolo mode — claude resumed with --dangerously-skip-permissions"
 }
 
