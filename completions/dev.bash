@@ -18,7 +18,7 @@ _dev() {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
   # All available commands
-  local commands="setup new ls attach kill hub dashboard ports logs url supabase pr pr-start shell worktree img projects update help status restart yolo send diff sync gc rename private template config agent stats doctor web bot services notify mobile m task ask ghost scaffold review vibes fortune lenny linear"
+  local commands="setup new ls attach kill hub dashboard ports logs url supabase pr pr-start shell worktree img projects update help status restart yolo send diff sync gc rename private template config agent stats doctor web bot services notify mobile m task ask ghost scaffold review vibes fortune lenny linear admin setup-account"
 
   # Commands that take a session name as second argument
   local session_cmds="attach kill logs url supabase shell pr status restart yolo send diff sync rename private review"
@@ -58,6 +58,7 @@ _dev() {
     # Subcommand completion
     case "$cmd" in
       img)      COMPREPLY=( $(compgen -W "ls cp grab path clean" -- "$cur") ) ;;
+      admin)    COMPREPLY=( $(compgen -W "add-user remove-user list-users suspend-user restore-user set-role set-limit status audit stale-sessions port-access backup restore update help" -- "$cur") ) ;;
       web)      COMPREPLY=( $(compgen -W "setup start stop status" -- "$cur") ) ;;
       bot)      COMPREPLY=( $(compgen -W "setup start stop status" -- "$cur") ) ;;
       services) COMPREPLY=( $(compgen -W "install uninstall start stop restart status logs" -- "$cur") ) ;;

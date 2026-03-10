@@ -86,6 +86,17 @@ DEFAULT_CONFIG='{
   }
 }'
 
+# ── Library Loading ─────────────────────────────────────────────────────────
+# Source libraries if available
+_dev_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -d "$_dev_script_dir/../lib/dev-cli" ]]; then
+    LIB_DIR="$_dev_script_dir/../lib/dev-cli"
+elif [[ -d "$_dev_script_dir/../lib" ]]; then
+    LIB_DIR="$_dev_script_dir/../lib"
+fi
+[[ -n "${LIB_DIR:-}" && -f "$LIB_DIR/auth.sh" ]] && source "$LIB_DIR/auth.sh"
+[[ -n "${LIB_DIR:-}" && -f "$LIB_DIR/audit.sh" ]] && source "$LIB_DIR/audit.sh"
+
 # ── Terminal Detection ─────────────────────────────────────────────────────
 term_width() { tput cols 2>/dev/null || echo 80; }
 is_compact() { [[ $(term_width) -lt 90 ]]; }
@@ -424,6 +435,28 @@ slot_ports() {
   local supa_db=$((BASE_SUPA_DB_PORT + offset * SUPA_PORT_GAP))
   local supa_studio=$((BASE_SUPA_STUDIO_PORT + offset * SUPA_PORT_GAP))
   echo "$frontend $backend $supa_api $supa_db $supa_studio"
+}
+
+# Set up authbind for a user's allocated ports
+setup_authbind_ports() {
+    local username="$1" frontend_port="$2" backend_port="$3" supa_api_port="$4" supa_db_port="$5" supa_studio_port="$6"
+    local ports=("$frontend_port" "$backend_port" "$supa_api_port" "$supa_db_port" "$supa_studio_port")
+    for port in "${ports[@]}"; do
+        [[ "$port" == "null" || -z "$port" ]] && continue
+        sudo touch "/etc/authbind/byport/$port" 2>/dev/null || true
+        sudo chown "$username" "/etc/authbind/byport/$port" 2>/dev/null || true
+        sudo chmod 500 "/etc/authbind/byport/$port" 2>/dev/null || true
+    done
+}
+
+# Clean up authbind for deallocated ports
+cleanup_authbind_ports() {
+    local frontend_port="$1" backend_port="$2" supa_api_port="$3" supa_db_port="$4" supa_studio_port="$5"
+    local ports=("$frontend_port" "$backend_port" "$supa_api_port" "$supa_db_port" "$supa_studio_port")
+    for port in "${ports[@]}"; do
+        [[ "$port" == "null" || -z "$port" ]] && continue
+        sudo rm -f "/etc/authbind/byport/$port" 2>/dev/null || true
+    done
 }
 
 # Register a session in the port registry
@@ -1542,6 +1575,14 @@ cmd_new() {
   local name
   name=$(session_name "$project" "$branch")
 
+  # Check session limit
+  if type can_create_session &>/dev/null && ! can_create_session "$USER"; then
+    local _max _current
+    _max=$(get_user_max_sessions "$USER")
+    _current=$(count_user_sessions "$USER")
+    die "Session limit reached ($_current/$_max). Kill an existing session or ask admin to increase your limit."
+  fi
+
   # Validate
   [ -d "$bare_dir" ] || die "Project '$project' not found. Run 'dev setup $project <url>' first."
   [ -z "$(get_session "$name")" ] || die "Session '$name' already exists. Run 'dev kill $name' first."
@@ -1596,6 +1637,11 @@ cmd_new() {
   local ports
   ports=$(slot_ports "$slot")
   read -r wt_frontend wt_backend wt_supa_api wt_supa_db wt_supa_studio <<< "$ports"
+
+  # Set up port isolation
+  if command -v authbind &>/dev/null && type setup_authbind_ports &>/dev/null; then
+    setup_authbind_ports "$USER" "$wt_frontend" "$wt_backend" "$wt_supa_api" "$wt_supa_db" "$wt_supa_studio"
+  fi
 
   # Check project config to determine which ports are needed
   local proj_config="$CONFIG_DIR/projects/${project}.json"
@@ -1695,6 +1741,7 @@ cmd_new() {
 
   # Register in port registry (include container_id if present)
   register_session "$name" "$project" "$branch" "$slot" "$agent" "$worktree_path" "$private"
+  type audit_log &>/dev/null && audit_log "$USER" "session.create" "$name" "$(jq -nc --arg p "$project" --arg b "$branch" '{project:$p,branch:$b}')"
 
   # Store container info in registry if container mode
   if [ -n "$container_id" ]; then
@@ -2068,6 +2115,7 @@ cmd_attach() {
     fi
   fi
 
+  type audit_log &>/dev/null && audit_log "$USER" "session.attach" "$match" '{}'
   tmux attach-session -t "$match"
 }
 
@@ -2269,6 +2317,7 @@ cmd_kill() {
       log "Removed ghost directory"
     fi
     unregister_session "$name"
+    type audit_log &>/dev/null && audit_log "$USER" "session.kill" "$name" '{}'
     log "Session '$name' fully cleaned up"
     random_farewell
     return 0
@@ -2310,6 +2359,7 @@ cmd_kill() {
       log "Removed scaffold directory"
     fi
     unregister_session "$name"
+    type audit_log &>/dev/null && audit_log "$USER" "session.kill" "$name" '{}'
     log "Session '$name' fully cleaned up"
     random_farewell
     return 0
@@ -2364,8 +2414,20 @@ cmd_kill() {
     fi
   fi
 
+  # Clean up port isolation
+  if command -v authbind &>/dev/null && type cleanup_authbind_ports &>/dev/null; then
+    local _kill_fp _kill_bp _kill_sap _kill_sdp _kill_ssp
+    _kill_fp=$(get_session_field "$name" "ports.frontend" 2>/dev/null || echo "")
+    _kill_bp=$(get_session_field "$name" "ports.backend" 2>/dev/null || echo "")
+    _kill_sap=$(get_session_field "$name" "ports.supa_api" 2>/dev/null || echo "")
+    _kill_sdp=$(get_session_field "$name" "ports.supa_db" 2>/dev/null || echo "")
+    _kill_ssp=$(get_session_field "$name" "ports.supa_studio" 2>/dev/null || echo "")
+    cleanup_authbind_ports "$_kill_fp" "$_kill_bp" "$_kill_sap" "$_kill_sdp" "$_kill_ssp"
+  fi
+
   # Unregister
   unregister_session "$name"
+  type audit_log &>/dev/null && audit_log "$USER" "session.kill" "$name" '{}'
   log "Session '$name' fully cleaned up"
   random_farewell
 }
@@ -6916,6 +6978,13 @@ cmd_help() {
     dev fortune                             Random dev joke / wisdom
     dev lenny                               Random lenny face (essential tooling)
 
+  ADMIN
+    dev admin <cmd>    Admin commands (user management, monitoring, operations)
+                       Run 'dev admin help' for details
+
+  GETTING STARTED
+    dev setup-account  Interactive first-time account setup
+
   TMUX CHEATSHEET (inside a session)
     Ctrl+a d          Detach (session keeps running)
     Ctrl+a s          Switch between sessions
@@ -6981,6 +7050,9 @@ case "${1:-help}" in
   vibes)     cmd_vibes ;;
   fortune)   cmd_fortune ;;
   lenny)     cmd_lenny ;;
+  admin)          shift; bash "$(dirname "$0")/dev-admin" "$@" ;;
+  setup-account)  cmd_setup_account "$@" ;;
+  --version|-v)   echo "dev-cli $(cat "$(dirname "$0")/.dev-version" 2>/dev/null || echo "unknown")"; exit 0 ;;
   help|-h|--help) cmd_help ;;
   *)         die "Unknown command: $1. Run 'dev help' for usage." ;;
 esac
