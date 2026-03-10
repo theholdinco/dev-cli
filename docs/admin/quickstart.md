@@ -10,7 +10,16 @@ Get dev-cli running on a fresh VPS in 10 minutes.
 
 ## Step 1: Bootstrap the Server
 
-SSH into your VPS and run:
+Bootstrap must run as a **non-root user**. If your VPS only has root, create your admin user first:
+
+```bash
+# As root:
+adduser <your-username>
+usermod -aG sudo <your-username>
+su - <your-username>
+```
+
+Then run bootstrap:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/theholdinco/dev-cli/main/bootstrap.sh | bash
