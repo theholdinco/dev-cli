@@ -104,6 +104,9 @@ sudo apt install -y \
   file \
   procps
 
+info "Installing authbind..."
+sudo apt-get install -y authbind
+
 log "System packages installed"
 
 # ---------------------------------------------------------------------------
@@ -223,6 +226,43 @@ else
   log "Tailscale installed"
   warn "Run 'sudo tailscale up --ssh' to connect to your Tailscale network"
 fi
+
+# Install SSH identity binding
+SCRIPT_DIR_BS="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR_BS/ssh/validate-tailscale-identity.sh" ]; then
+  info "Setting up SSH identity binding..."
+  sudo cp "$SCRIPT_DIR_BS/ssh/validate-tailscale-identity.sh" /usr/local/bin/validate-tailscale-identity
+  sudo chmod 755 /usr/local/bin/validate-tailscale-identity
+
+  # Configure sshd to use the validation script
+  sudo mkdir -p /etc/ssh/sshd_config.d
+  if ! grep -q "validate-tailscale-identity" /etc/ssh/sshd_config.d/dev-cli.conf 2>/dev/null; then
+    sudo tee /etc/ssh/sshd_config.d/dev-cli.conf > /dev/null <<'SSHEOF'
+# dev-cli: Tailscale identity validation
+AuthorizedKeysCommand /usr/local/bin/validate-tailscale-identity %u
+AuthorizedKeysCommandUser root
+SSHEOF
+    sudo systemctl reload sshd 2>/dev/null || true
+  fi
+  log "SSH identity binding configured"
+fi
+
+# Harden SSH: disable password auth for local connections
+info "Hardening SSH configuration..."
+sudo mkdir -p /etc/ssh/sshd_config.d
+if [ ! -f /etc/ssh/sshd_config.d/dev-cli-hardening.conf ]; then
+  sudo tee /etc/ssh/sshd_config.d/dev-cli-hardening.conf > /dev/null <<'SSHEOF'
+# dev-cli: Prevent cross-user access
+# Disable local password auth (prevents su/ssh localhost attacks)
+Match Address 127.0.0.1,::1
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+SSHEOF
+fi
+
+# Restrict su to root only
+info "Restricting su access..."
+sudo dpkg-statoverride --update --add root adm 4750 /bin/su 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # 8. tmux
