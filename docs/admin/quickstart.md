@@ -39,7 +39,9 @@ Follow the link to authenticate. Note your Tailscale IP:
 tailscale ip -4
 ```
 
-## Step 3: Add Your Admin Account
+## Step 3: Set Your Admin Email
+
+Bootstrap automatically registers you as admin. Once Tailscale is connected, update your email so users can identify you:
 
 ```bash
 dev admin add-user $(whoami) --tailscale-email your@email.com --role admin

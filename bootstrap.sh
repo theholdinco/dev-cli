@@ -453,6 +453,29 @@ fi
 log "dev CLI installed"
 
 # ---------------------------------------------------------------------------
+# 15b. Register bootstrapping user as admin
+# ---------------------------------------------------------------------------
+_USERS_FILE="/etc/dev-cli/users.json"
+if [ -f "$_USERS_FILE" ]; then
+  _user_count=$(jq '.users | length' "$_USERS_FILE" 2>/dev/null || echo "0")
+  if [ "$_user_count" -eq 0 ]; then
+    info "Registering $USER as admin in the user registry..."
+    _now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    _tmp=$(mktemp)
+    jq --arg u "$USER" --arg t "$_now" \
+      '.users[$u] = {"tailscale_email": "", "role": "admin", "created": $t, "status": "active", "max_sessions": 8, "onboarded": false}' \
+      "$_USERS_FILE" > "$_tmp" \
+      && sudo mv "$_tmp" "$_USERS_FILE" \
+      && sudo chown ":devs" "$_USERS_FILE" \
+      && sudo chmod g+w "$_USERS_FILE"
+    log "$USER registered as admin. Set your Tailscale email with:"
+    info "  dev admin add-user $USER --tailscale-email your@email.com --role admin"
+  else
+    info "User registry already has $_user_count user(s) — skipping auto-registration"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 16. Shell enhancements
 # ---------------------------------------------------------------------------
 info "Adding shell aliases and helpers..."
