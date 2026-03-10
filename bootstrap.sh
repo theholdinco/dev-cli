@@ -426,12 +426,16 @@ if [ -f "$SCRIPT_DIR/install.sh" ]; then
   echo N | bash "$SCRIPT_DIR/install.sh"
 else
   # Running via curl | bash — clone the repo first
-  info "Cloning dev-cli repository to $DEV_CLI_REPO..."
+  # Allow overriding branch via DEV_CLI_BRANCH env var (default: main)
+  DEV_CLI_BRANCH="${DEV_CLI_BRANCH:-main}"
+  info "Cloning dev-cli ($DEV_CLI_BRANCH) to $DEV_CLI_REPO..."
   if [ -d "$DEV_CLI_REPO" ]; then
     info "Repo already exists at $DEV_CLI_REPO, pulling latest..."
+    git -C "$DEV_CLI_REPO" fetch origin
+    git -C "$DEV_CLI_REPO" checkout "$DEV_CLI_BRANCH"
     git -C "$DEV_CLI_REPO" pull --ff-only
   else
-    sudo git clone https://github.com/theholdinco/dev-cli.git "$DEV_CLI_REPO"
+    sudo git clone -b "$DEV_CLI_BRANCH" https://github.com/theholdinco/dev-cli.git "$DEV_CLI_REPO"
     sudo chown -R "$USER:$USER" "$DEV_CLI_REPO"
   fi
   echo N | bash "$DEV_CLI_REPO/install.sh"
