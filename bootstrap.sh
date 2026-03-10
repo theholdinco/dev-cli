@@ -229,6 +229,8 @@ fi
 
 # Install SSH identity binding
 SCRIPT_DIR_BS="$(cd "$(dirname "$0")" && pwd)"
+# When run via curl | bash, fall back to the cloned repo location
+[ -f "$SCRIPT_DIR_BS/ssh/validate-tailscale-identity.sh" ] || SCRIPT_DIR_BS="/opt/dev-cli"
 if [ -f "$SCRIPT_DIR_BS/ssh/validate-tailscale-identity.sh" ]; then
   info "Setting up SSH identity binding..."
   sudo cp "$SCRIPT_DIR_BS/ssh/validate-tailscale-identity.sh" /usr/local/bin/validate-tailscale-identity
@@ -418,11 +420,21 @@ log "Directory structure created"
 # ---------------------------------------------------------------------------
 info "Installing dev CLI..."
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DEV_CLI_REPO="/opt/dev-cli"
 if [ -f "$SCRIPT_DIR/install.sh" ]; then
+  # Running from a cloned repo
   echo N | bash "$SCRIPT_DIR/install.sh"
 else
-  warn "install.sh not found at $SCRIPT_DIR"
-  warn "Run ./install.sh manually from the dev-cli repo"
+  # Running via curl | bash — clone the repo first
+  info "Cloning dev-cli repository to $DEV_CLI_REPO..."
+  if [ -d "$DEV_CLI_REPO" ]; then
+    info "Repo already exists at $DEV_CLI_REPO, pulling latest..."
+    git -C "$DEV_CLI_REPO" pull --ff-only
+  else
+    sudo git clone https://github.com/theholdinco/dev-cli.git "$DEV_CLI_REPO"
+    sudo chown -R "$USER:$USER" "$DEV_CLI_REPO"
+  fi
+  echo N | bash "$DEV_CLI_REPO/install.sh"
 fi
 log "dev CLI installed"
 
