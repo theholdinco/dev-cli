@@ -4767,6 +4767,24 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
+
+    sudo tee "$service_dir/dev-linear.service" > /dev/null << EOF
+[Unit]
+Description=dev-cli Linear Integration
+After=network.target
+
+[Service]
+Type=exec
+User=$run_user
+Environment=HOME=$run_home
+Environment=PATH=$run_home/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=$run_home/.local/bin/dev-linear --watch
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
+EOF
   }
 
   case "$subcmd" in
@@ -4810,16 +4828,27 @@ EOF
       fi
       sudo systemctl enable dev-task-runner.service
       log "dev-task-runner service installed and enabled"
+      local linear_key
+      linear_key=$(get_config_value '.linear.api_key' '')
+      if [ -n "$linear_key" ]; then
+        sudo systemctl enable dev-linear.service
+        log "dev-linear service installed and enabled"
+      else
+        info "Linear integration not enabled (not configured)"
+        info "Run 'dev linear setup', then: dev services install"
+      fi
       info "Services will auto-start on boot. Start now with: dev services start"
       ;;
     uninstall)
       sudo systemctl stop dev-web.service 2>/dev/null || true
       sudo systemctl stop dev-bot.service 2>/dev/null || true
       sudo systemctl stop dev-task-runner.service 2>/dev/null || true
+      sudo systemctl stop dev-linear.service 2>/dev/null || true
       sudo systemctl disable dev-web.service 2>/dev/null || true
       sudo systemctl disable dev-bot.service 2>/dev/null || true
       sudo systemctl disable dev-task-runner.service 2>/dev/null || true
-      sudo rm -f "$service_dir/dev-web.service" "$service_dir/dev-bot.service" "$service_dir/dev-task-runner.service"
+      sudo systemctl disable dev-linear.service 2>/dev/null || true
+      sudo rm -f "$service_dir/dev-web.service" "$service_dir/dev-bot.service" "$service_dir/dev-task-runner.service" "$service_dir/dev-linear.service"
       sudo systemctl daemon-reload
       log "Services uninstalled"
       ;;
@@ -4834,11 +4863,16 @@ EOF
       fi
       sudo systemctl start dev-task-runner.service
       log "Task runner started"
+      if systemctl is-enabled dev-linear.service &>/dev/null; then
+        sudo systemctl start dev-linear.service
+        log "Linear integration started"
+      fi
       ;;
     stop)
       sudo systemctl stop dev-web.service 2>/dev/null && log "Web dashboard stopped" || true
       sudo systemctl stop dev-bot.service 2>/dev/null && log "Telegram bot stopped" || true
       sudo systemctl stop dev-task-runner.service 2>/dev/null && log "Task runner stopped" || true
+      sudo systemctl stop dev-linear.service 2>/dev/null && log "Linear integration stopped" || true
       ;;
     restart)
       sudo systemctl restart dev-web.service
@@ -4851,6 +4885,10 @@ EOF
       fi
       sudo systemctl restart dev-task-runner.service
       log "Task runner restarted"
+      if systemctl is-enabled dev-linear.service &>/dev/null; then
+        sudo systemctl restart dev-linear.service
+        log "Linear integration restarted"
+      fi
       ;;
     status)
       echo -e "${BOLD}Services:${NC}"
@@ -4874,8 +4912,15 @@ EOF
       else
         echo -e "  ${RED}●${NC} Task runner"
       fi
+      if [ -f "$service_dir/dev-linear.service" ]; then
+        if systemctl is-active dev-linear.service &>/dev/null; then
+          echo -e "  ${GREEN}●${NC} Linear integration"
+        else
+          echo -e "  ${RED}●${NC} Linear integration"
+        fi
+      fi
       echo ""
-      if [ -f "$service_dir/dev-web.service" ]; then
+      if [ -f "$service_dir/dev-web.service" ] || [ -f "$service_dir/dev-linear.service" ]; then
         echo -e "  Installed: ${GREEN}yes${NC} (auto-start on boot)"
       else
         echo -e "  Installed: ${RED}no${NC} (run 'dev services install')"
@@ -4887,11 +4932,12 @@ EOF
         web) journalctl -u dev-web.service -f --no-hostname ;;
         bot) journalctl -u dev-bot.service -f --no-hostname ;;
         task-runner) journalctl -u dev-task-runner.service -f --no-hostname ;;
-        *)   die "Unknown service: $service. Use 'web', 'bot', or 'task-runner'" ;;
+        linear) journalctl -u dev-linear.service -f --no-hostname ;;
+        *)   die "Unknown service: $service. Use 'web', 'bot', 'task-runner', or 'linear'" ;;
       esac
       ;;
     *)
-      echo "Usage: dev services <install|uninstall|start|stop|restart|status|logs [web|bot]>"
+      echo "Usage: dev services <install|uninstall|start|stop|restart|status|logs [web|bot|task-runner|linear]>"
       ;;
   esac
 }
@@ -6167,6 +6213,333 @@ cmd_review() {
   echo ""
 }
 
+cmd_linear() {
+  local subcmd="${2:-status}"
+
+  case "$subcmd" in
+    setup)
+      echo ""
+      echo -e "  ${BOLD}${CYAN}Linear Integration Setup${NC}"
+      echo ""
+
+      # API Key
+      local cur_key
+      cur_key=$(jq -r '.linear.api_key // empty' "$GLOBAL_CONFIG" 2>/dev/null)
+      if [ -n "$cur_key" ]; then
+        echo -e "  Current API key: ${DIM}${cur_key:0:12}...${NC}"
+        read -rp "  Linear API key (Enter to keep existing): " api_key
+        api_key="${api_key:-$cur_key}"
+      else
+        read -rp "  Linear API key (lin_api_...): " api_key
+      fi
+      [ -n "$api_key" ] || die "API key is required"
+
+      # Auto-detect Linear user
+      local detected_user_id detected_user_name user_id cur_user_id
+      cur_user_id=$(jq -r '.linear.user_id // empty' "$GLOBAL_CONFIG" 2>/dev/null)
+      echo ""
+      echo -e "  ${DIM}Detecting your Linear user...${NC}"
+      local viewer_query viewer_response
+      viewer_query='{"query":"{ viewer { id name } }"}'
+      viewer_response=$(curl -s -X POST "https://api.linear.app/graphql" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: $api_key" \
+        -d "$viewer_query" 2>/dev/null) || viewer_response=""
+      detected_user_id=$(echo "$viewer_response" | jq -r '.data.viewer.id // empty' 2>/dev/null)
+      detected_user_name=$(echo "$viewer_response" | jq -r '.data.viewer.name // empty' 2>/dev/null)
+
+      if [ -n "$detected_user_id" ]; then
+        echo -e "  Detected as: ${BOLD}${detected_user_name}${NC} (${DIM}${detected_user_id}${NC})"
+        read -rp "  Use this user ID to filter issues? [Y/n]: " use_detected
+        if [[ "$use_detected" =~ ^[Nn]$ ]]; then
+          local prompt_uid="  Linear user ID"
+          [ -n "$cur_user_id" ] && prompt_uid+=" [${cur_user_id}]"
+          read -rp "${prompt_uid}: " user_id
+          user_id="${user_id:-$cur_user_id}"
+          [ -n "$user_id" ] || die "User ID is required"
+        else
+          user_id="$detected_user_id"
+        fi
+      else
+        echo -e "  ${YELLOW}Could not auto-detect user (check API key or network).${NC}"
+        local prompt_uid="  Linear user ID (UUID)"
+        [ -n "$cur_user_id" ] && prompt_uid+=" [${cur_user_id}]"
+        read -rp "${prompt_uid}: " user_id
+        user_id="${user_id:-$cur_user_id}"
+        [ -n "$user_id" ] || die "User ID is required"
+      fi
+
+      # Team ID
+      local cur_team
+      cur_team=$(jq -r '.linear.team_id // empty' "$GLOBAL_CONFIG" 2>/dev/null)
+      if [ -n "$cur_team" ]; then
+        read -rp "  Team ID [${cur_team}]: " team_id
+        team_id="${team_id:-$cur_team}"
+      else
+        read -rp "  Team ID (UUID from Linear settings): " team_id
+      fi
+      [ -n "$team_id" ] || die "Team ID is required"
+
+      # Label name
+      local cur_label
+      cur_label=$(jq -r '.linear.label_name // "auto-agent"' "$GLOBAL_CONFIG" 2>/dev/null)
+      read -rp "  Label name to watch [${cur_label}]: " label_name
+      label_name="${label_name:-$cur_label}"
+
+      # Default project
+      local cur_project
+      cur_project=$(jq -r '.linear.default_project // empty' "$GLOBAL_CONFIG" 2>/dev/null)
+      if [ -n "$cur_project" ]; then
+        echo -e "  Current default project: ${DIM}${cur_project}${NC}"
+      fi
+      echo ""
+      echo -e "  ${DIM}Available projects:${NC}"
+      ls "$CONFIG_DIR/projects/" 2>/dev/null | sed 's/\.json$//' | while read -r p; do
+        echo -e "    ${DIM}•${NC} $p"
+      done
+      echo ""
+      local prompt_proj="  Default dev-cli project"
+      [ -n "$cur_project" ] && prompt_proj+=" [${cur_project}]"
+      read -rp "${prompt_proj}: " default_project
+      default_project="${default_project:-$cur_project}"
+      [ -n "$default_project" ] || die "Default project is required"
+
+      # Validate project exists
+      [ -f "$CONFIG_DIR/projects/${default_project}.json" ] \
+        || die "Project '${default_project}' not found. Run 'dev setup' first."
+
+      # Base branch
+      local cur_from
+      cur_from=$(jq -r '.linear.default_from_branch // "main"' "$GLOBAL_CONFIG" 2>/dev/null)
+      read -rp "  Base branch [${cur_from}]: " from_branch
+      from_branch="${from_branch:-$cur_from}"
+
+      # Poll interval
+      local cur_interval
+      cur_interval=$(jq -r '.linear.poll_interval_seconds // 90' "$GLOBAL_CONFIG" 2>/dev/null)
+      read -rp "  Poll interval in seconds [${cur_interval}]: " poll_interval
+      poll_interval="${poll_interval:-$cur_interval}"
+
+      # MCP enabled
+      local cur_mcp
+      cur_mcp=$(jq -r '.linear.mcp_enabled // false' "$GLOBAL_CONFIG" 2>/dev/null)
+      read -rp "  Inject Linear MCP into worktrees? [y/N] (currently: ${cur_mcp}): " mcp_yn
+      local mcp_enabled=false
+      [[ "$mcp_yn" =~ ^[Yy]$ ]] && mcp_enabled=true
+
+      # Project map (optional)
+      echo ""
+      echo -e "  ${DIM}Project mapping: Linear project name → dev-cli project${NC}"
+      echo -e "  ${DIM}Press Enter to skip (uses default project for all issues)${NC}"
+      local project_map="{}"
+      while true; do
+        read -rp "  Linear project name (blank to finish): " lp_name
+        [ -n "$lp_name" ] || break
+        read -rp "  → dev-cli project: " dp_name
+        [ -n "$dp_name" ] || break
+        project_map=$(echo "$project_map" | jq --arg k "$lp_name" --arg v "$dp_name" '.[$k] = $v')
+      done
+
+      # State name configuration (optional)
+      echo ""
+      echo -e "  ${DIM}State name configuration (optional — press Enter to skip each)${NC}"
+
+      local cur_filter_state cur_in_review cur_blocked cur_ready
+      cur_filter_state=$(jq -r '.linear.filter_by_state_name // empty' "$GLOBAL_CONFIG" 2>/dev/null)
+      cur_in_review=$(jq -r '.linear.state_in_review // empty' "$GLOBAL_CONFIG" 2>/dev/null)
+      cur_blocked=$(jq -r '.linear.state_blocked // empty' "$GLOBAL_CONFIG" 2>/dev/null)
+      cur_ready=$(jq -r '.linear.state_ready // empty' "$GLOBAL_CONFIG" 2>/dev/null)
+
+      local prompt_filter="  Filter issues by Linear state name (blank = use label+type filter)"
+      [ -n "$cur_filter_state" ] && prompt_filter+=" [${cur_filter_state}]"
+      read -rp "${prompt_filter}: " filter_state_name
+      filter_state_name="${filter_state_name:-$cur_filter_state}"
+
+      local prompt_review="  State name for \"In Review\" (blank to skip)"
+      [ -n "$cur_in_review" ] && prompt_review+=" [${cur_in_review}]"
+      read -rp "${prompt_review}: " state_in_review
+      state_in_review="${state_in_review:-$cur_in_review}"
+
+      local prompt_blocked="  State name for \"Blocked\" (blank to skip)"
+      [ -n "$cur_blocked" ] && prompt_blocked+=" [${cur_blocked}]"
+      read -rp "${prompt_blocked}: " state_blocked
+      state_blocked="${state_blocked:-$cur_blocked}"
+
+      local prompt_ready="  State name to re-queue failed tasks (blank = first unstarted state)"
+      [ -n "$cur_ready" ] && prompt_ready+=" [${cur_ready}]"
+      read -rp "${prompt_ready}: " state_ready
+      state_ready="${state_ready:-$cur_ready}"
+
+      # Write config
+      local tmp="$GLOBAL_CONFIG.tmp.$$"
+      jq --arg key "$api_key" \
+         --arg uid "$user_id" \
+         --arg team "$team_id" \
+         --arg label "$label_name" \
+         --arg proj "$default_project" \
+         --arg from "$from_branch" \
+         --argjson interval "$poll_interval" \
+         --argjson mcp "$mcp_enabled" \
+         --argjson pmap "$project_map" \
+         --arg filter_state "$filter_state_name" \
+         --arg in_review "$state_in_review" \
+         --arg blocked "$state_blocked" \
+         --arg ready "$state_ready" \
+        '.linear = {
+          api_key: $key,
+          user_id: $uid,
+          team_id: $team,
+          label_name: $label,
+          default_project: $proj,
+          default_from_branch: $from,
+          poll_interval_seconds: $interval,
+          default_mode: "normal",
+          mcp_enabled: $mcp,
+          project_map: $pmap,
+          filter_by_state_name: $filter_state,
+          state_in_review: $in_review,
+          state_blocked: $blocked,
+          state_ready: $ready
+        }' "$GLOBAL_CONFIG" > "$tmp" && mv "$tmp" "$GLOBAL_CONFIG"
+
+      echo ""
+      log "Linear integration configured."
+      info "Test connectivity with: dev linear test"
+      info "Start polling with:     dev linear watch"
+      echo ""
+      ;;
+
+    sync)
+      local dry_flag=""
+      [ "${3:-}" = "--dry-run" ] && dry_flag="--dry-run"
+      info "Running Linear sync..."
+      dev-linear --once $dry_flag
+      ;;
+
+    watch)
+      info "Starting Linear daemon (foreground)..."
+      info "Press Ctrl+C to stop."
+      echo ""
+      dev-linear --watch
+      ;;
+
+    status)
+      echo ""
+      echo -e "  ${BOLD}${CYAN}Linear Integration${NC}"
+      echo ""
+
+      if ! jq -e '.linear' "$GLOBAL_CONFIG" &>/dev/null; then
+        echo -e "  ${YELLOW}Not configured.${NC} Run: dev linear setup"
+        echo ""
+        return
+      fi
+
+      local api_key user_id team_id label_name default_project poll_interval mcp_enabled
+      local filter_state in_review_state blocked_state ready_state
+      api_key=$(jq -r '.linear.api_key // ""' "$GLOBAL_CONFIG")
+      user_id=$(jq -r '.linear.user_id // ""' "$GLOBAL_CONFIG")
+      team_id=$(jq -r '.linear.team_id // ""' "$GLOBAL_CONFIG")
+      label_name=$(jq -r '.linear.label_name // "auto-agent"' "$GLOBAL_CONFIG")
+      default_project=$(jq -r '.linear.default_project // ""' "$GLOBAL_CONFIG")
+      poll_interval=$(jq -r '.linear.poll_interval_seconds // 90' "$GLOBAL_CONFIG")
+      mcp_enabled=$(jq -r '.linear.mcp_enabled // false' "$GLOBAL_CONFIG")
+      filter_state=$(jq -r '.linear.filter_by_state_name // empty' "$GLOBAL_CONFIG")
+      in_review_state=$(jq -r '.linear.state_in_review // empty' "$GLOBAL_CONFIG")
+      blocked_state=$(jq -r '.linear.state_blocked // empty' "$GLOBAL_CONFIG")
+      ready_state=$(jq -r '.linear.state_ready // empty' "$GLOBAL_CONFIG")
+
+      echo -e "  ${BOLD}Config:${NC}"
+      echo -e "    API key:         ${DIM}${api_key:0:12}...${NC}"
+      echo -e "    User filter:     $user_id"
+      echo -e "    Team ID:         $team_id"
+      echo -e "    Label:           $label_name"
+      echo -e "    Default project: $default_project"
+      echo -e "    Poll interval:   ${poll_interval}s"
+      echo -e "    MCP enabled:     $mcp_enabled"
+      local state_filter_display
+      [ -n "$filter_state" ] && state_filter_display="$filter_state" || state_filter_display="(label+type)"
+      echo -e "    State filter:    $state_filter_display"
+      [ -n "$in_review_state" ] && echo -e "    In Review state: $in_review_state"
+      [ -n "$blocked_state" ]   && echo -e "    Blocked state:   $blocked_state"
+      [ -n "$ready_state" ]     && echo -e "    Ready state:     $ready_state"
+      echo ""
+
+      if [ -f "$CONFIG_DIR/linear-state.json" ]; then
+        local last_sync issue_count last_error
+        last_sync=$(jq -r '.last_sync // "never"' "$CONFIG_DIR/linear-state.json")
+        issue_count=$(jq '.issue_to_task | length' "$CONFIG_DIR/linear-state.json")
+        last_error=$(jq -r '.last_error // empty' "$CONFIG_DIR/linear-state.json")
+
+        echo -e "  ${BOLD}State:${NC}"
+        echo -e "    Last sync:       $last_sync"
+        echo -e "    Issues tracked:  $issue_count"
+        if [ -n "$last_error" ]; then
+          echo -e "    Last error:      ${RED}$last_error${NC}"
+        fi
+        echo ""
+      else
+        echo -e "  ${DIM}No sync state yet. Run: dev linear sync${NC}"
+        echo ""
+      fi
+      ;;
+
+    log)
+      local log_file="$CONFIG_DIR/logs/linear.log"
+      if [ ! -f "$log_file" ]; then
+        info "No log file yet. Run: dev linear sync"
+        return
+      fi
+      tail -f "$log_file"
+      ;;
+
+    test)
+      local api_key team_id
+      api_key=$(jq -r '.linear.api_key // empty' "$GLOBAL_CONFIG" 2>/dev/null)
+      team_id=$(jq -r '.linear.team_id // empty' "$GLOBAL_CONFIG" 2>/dev/null)
+
+      [ -n "$api_key" ] || die "Linear not configured. Run: dev linear setup"
+      [ -n "$team_id" ] || die "Linear not configured. Run: dev linear setup"
+
+      info "Testing Linear API connectivity..."
+
+      local query response
+      query=$(jq -n --arg team_id "$team_id" \
+        '{"query": "{ team(id: \"\($team_id)\") { name } }"}')
+
+      response=$(curl -s -X POST "https://api.linear.app/graphql" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: $api_key" \
+        -d "$query" 2>&1) || die "curl failed: $response"
+
+      local errors team_name
+      errors=$(echo "$response" | jq -r '.errors // empty' 2>/dev/null)
+      team_name=$(echo "$response" | jq -r '.data.team.name // empty' 2>/dev/null)
+
+      if [ -n "$errors" ] && [ "$errors" != "null" ]; then
+        die "API error: $errors"
+      fi
+
+      if [ -n "$team_name" ]; then
+        log "Connected to Linear team: $team_name"
+        info "API key and team ID are valid."
+      else
+        die "Unexpected response: $response"
+      fi
+      ;;
+
+    *)
+      echo "Usage: dev linear <setup|sync|watch|status|log|test>"
+      echo ""
+      echo "  setup   Interactive configuration wizard"
+      echo "  sync    Run one sync pass (fetch new issues + update Linear statuses)"
+      echo "  watch   Run polling daemon in foreground"
+      echo "  status  Show configuration and last sync info"
+      echo "  log     Tail the Linear daemon log"
+      echo "  test    Test API key and team ID connectivity"
+      ;;
+  esac
+}
+
 cmd_vibes() {
   local arts=(
     "
@@ -6431,7 +6804,14 @@ cmd_help() {
     dev services stop                       Stop all services
     dev services restart                    Restart all services
     dev services status                     Show service status
-    dev services logs [web|bot|task-runner]  Follow service logs
+    dev services logs [web|bot|task-runner|linear]  Follow service logs
+
+  LINEAR INTEGRATION
+    dev linear setup                        Configure Linear API key, team, label, and filters
+    dev linear status                       Show current Linear configuration
+    dev linear run                          Run Linear poller (single pass)
+    dev linear watch                        Run Linear poller (watch mode)
+    dev linear test                         Test Linear API connectivity
 
   DEVCONTAINER (sandboxed agent sessions)
     --container                             Run agent inside a devcontainer
@@ -6552,6 +6932,7 @@ case "${1:-help}" in
   ghost)     cmd_ghost "$@" ;;
   scaffold)  cmd_scaffold "$@" ;;
   review)    cmd_review "$@" ;;
+  linear)    cmd_linear "$@" ;;
   mobile|m)  cmd_mobile ;;
   vibes)     cmd_vibes ;;
   fortune)   cmd_fortune ;;
