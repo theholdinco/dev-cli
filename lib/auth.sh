@@ -101,6 +101,7 @@ register_user() {
     local username="$1" email="$2" role="${3:-user}"
     local now
     now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    [[ -f "$USERS_FILE" ]] || echo '{"users":{}}' > "$USERS_FILE"
     local tmp
     tmp=$(mktemp)
     (flock 200

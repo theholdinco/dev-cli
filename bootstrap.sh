@@ -123,6 +123,16 @@ if [ ! -f /etc/dev-cli/ports.json ]; then
   sudo chown :devs /etc/dev-cli/ports.json
   sudo chmod g+w /etc/dev-cli/ports.json
 fi
+if [ ! -f /etc/dev-cli/users.json ]; then
+  echo '{"users":{}}' | sudo tee /etc/dev-cli/users.json > /dev/null
+  sudo chown :devs /etc/dev-cli/users.json
+  sudo chmod g+w /etc/dev-cli/users.json
+fi
+if [ ! -f /etc/dev-cli/audit.log ]; then
+  sudo touch /etc/dev-cli/audit.log
+  sudo chown :devs /etc/dev-cli/audit.log
+  sudo chmod g+w /etc/dev-cli/audit.log
+fi
 log "Shared infrastructure ready (/etc/dev-cli, devs group)"
 
 # ---------------------------------------------------------------------------
