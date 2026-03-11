@@ -45,6 +45,7 @@ ${BOLD}User Management:${NC}
   restore-user <name>
   set-role <name> <admin|user>
   set-limit <name> --max-sessions <N>
+  set-limit --global --max-sessions <N>
 
 ${BOLD}Monitoring:${NC}
   status                    System health overview
@@ -276,20 +277,33 @@ cmd_admin_set_role() {
 
 cmd_admin_set_limit() {
     require_admin || exit 1
-    local username="" max_sessions=""
+    local username="" max_sessions="" global=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --max-sessions) max_sessions="$2"; shift 2 ;;
+            --global) global=true; shift ;;
             *) [[ -z "$username" ]] && username="$1"; shift ;;
         esac
     done
-    [[ -n "$username" && -n "$max_sessions" ]] || die "Usage: dev admin set-limit <username> --max-sessions <N>"
-    is_user_registered "$username" || die "User '$username' is not registered"
+    [[ -n "$max_sessions" ]] || die "Usage: dev admin set-limit [--global | <username>] --max-sessions <N>"
     [[ "$max_sessions" =~ ^[0-9]+$ ]] || die "max-sessions must be a number"
 
-    set_user_field_raw "$username" "max_sessions" "$max_sessions"
-    log "User '$username' max sessions set to $max_sessions"
-    audit_log "$USER" "admin.set-limit" "$username" "$(jq -nc --argjson m "$max_sessions" '{max_sessions:$m}')"
+    if $global; then
+        local tmp
+        tmp=$(mktemp)
+        (flock 200
+            jq --argjson m "$max_sessions" '.settings.default_max_sessions = $m' "$USERS_FILE" \
+                > "$tmp" && cp "$tmp" "$USERS_FILE" && rm -f "$tmp"
+        ) 200>"$USERS_FILE.lock"
+        log "Global default max sessions set to $max_sessions"
+        audit_log "$USER" "admin.set-limit-global" "" "$(jq -nc --argjson m "$max_sessions" '{max_sessions:$m}')"
+    else
+        [[ -n "$username" ]] || die "Usage: dev admin set-limit [--global | <username>] --max-sessions <N>"
+        is_user_registered "$username" || die "User '$username' is not registered"
+        set_user_field_raw "$username" "max_sessions" "$max_sessions"
+        log "User '$username' max sessions set to $max_sessions"
+        audit_log "$USER" "admin.set-limit" "$username" "$(jq -nc --argjson m "$max_sessions" '{max_sessions:$m}')"
+    fi
 }
 
 # --- Monitoring Commands ---

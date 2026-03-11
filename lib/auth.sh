@@ -38,13 +38,18 @@ get_user_status() {
     get_user_field "$1" "status"
 }
 
-# Get user's max sessions (default 8)
+# Get user's max sessions (per-user → global default → hardcoded default)
 get_user_max_sessions() {
     local username="$1"
     if [[ -f "$USERS_FILE" ]]; then
-        local val
+        local val global_default
         val=$(jq -r --arg u "$username" '.users[$u].max_sessions // empty' "$USERS_FILE")
-        echo "${val:-$DEFAULT_MAX_SESSIONS}"
+        if [[ -n "$val" ]]; then
+            echo "$val"
+        else
+            global_default=$(jq -r '.settings.default_max_sessions // empty' "$USERS_FILE")
+            echo "${global_default:-$DEFAULT_MAX_SESSIONS}"
+        fi
     else
         echo "$DEFAULT_MAX_SESSIONS"
     fi
