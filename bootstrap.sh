@@ -104,6 +104,9 @@ sudo apt install -y \
   file \
   procps
 
+info "Installing authbind..."
+sudo apt-get install -y authbind
+
 log "System packages installed"
 
 # ---------------------------------------------------------------------------
@@ -119,6 +122,16 @@ if [ ! -f /etc/dev-cli/ports.json ]; then
   echo '{}' | sudo tee /etc/dev-cli/ports.json > /dev/null
   sudo chown :devs /etc/dev-cli/ports.json
   sudo chmod g+w /etc/dev-cli/ports.json
+fi
+if [ ! -f /etc/dev-cli/users.json ]; then
+  echo '{"users":{}}' | sudo tee /etc/dev-cli/users.json > /dev/null
+  sudo chown :devs /etc/dev-cli/users.json
+  sudo chmod g+w /etc/dev-cli/users.json
+fi
+if [ ! -f /etc/dev-cli/audit.log ]; then
+  sudo touch /etc/dev-cli/audit.log
+  sudo chown :devs /etc/dev-cli/audit.log
+  sudo chmod g+w /etc/dev-cli/audit.log
 fi
 log "Shared infrastructure ready (/etc/dev-cli, devs group)"
 
@@ -223,6 +236,45 @@ else
   log "Tailscale installed"
   warn "Run 'sudo tailscale up --ssh' to connect to your Tailscale network"
 fi
+
+# Install SSH identity binding
+SCRIPT_DIR_BS="$(cd "$(dirname "$0")" && pwd)"
+# When run via curl | bash, fall back to the cloned repo location
+[ -f "$SCRIPT_DIR_BS/ssh/validate-tailscale-identity.sh" ] || SCRIPT_DIR_BS="/opt/dev-cli"
+if [ -f "$SCRIPT_DIR_BS/ssh/validate-tailscale-identity.sh" ]; then
+  info "Setting up SSH identity binding..."
+  sudo cp "$SCRIPT_DIR_BS/ssh/validate-tailscale-identity.sh" /usr/local/bin/validate-tailscale-identity
+  sudo chmod 755 /usr/local/bin/validate-tailscale-identity
+
+  # Configure sshd to use the validation script
+  sudo mkdir -p /etc/ssh/sshd_config.d
+  if ! grep -q "validate-tailscale-identity" /etc/ssh/sshd_config.d/dev-cli.conf 2>/dev/null; then
+    sudo tee /etc/ssh/sshd_config.d/dev-cli.conf > /dev/null <<'SSHEOF'
+# dev-cli: Tailscale identity validation
+AuthorizedKeysCommand /usr/local/bin/validate-tailscale-identity %u
+AuthorizedKeysCommandUser root
+SSHEOF
+    sudo systemctl reload sshd 2>/dev/null || true
+  fi
+  log "SSH identity binding configured"
+fi
+
+# Harden SSH: disable password auth for local connections
+info "Hardening SSH configuration..."
+sudo mkdir -p /etc/ssh/sshd_config.d
+if [ ! -f /etc/ssh/sshd_config.d/dev-cli-hardening.conf ]; then
+  sudo tee /etc/ssh/sshd_config.d/dev-cli-hardening.conf > /dev/null <<'SSHEOF'
+# dev-cli: Prevent cross-user access
+# Disable local password auth (prevents su/ssh localhost attacks)
+Match Address 127.0.0.1,::1
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+SSHEOF
+fi
+
+# Restrict su to root only
+info "Restricting su access..."
+sudo dpkg-statoverride --update --add root adm 4750 /bin/su 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # 8. tmux
@@ -351,10 +403,18 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Claude Code is per-user (each engineer installs + logs in with their own subscription)
+# 13b. Claude Code (per-user install for the bootstrapping admin)
 # ---------------------------------------------------------------------------
-info "Claude Code is per-user. Each engineer runs:"
-info "  curl -fsSL https://claude.ai/install.sh | bash && claude login"
+if command -v claude &>/dev/null; then
+  log "Claude Code already installed"
+else
+  info "Installing Claude Code..."
+  if curl -fsSL https://claude.ai/install.sh | sh; then
+    log "Claude Code installed — run 'claude' to authenticate"
+  else
+    warn "Claude Code install failed — run manually: curl -fsSL https://claude.ai/install.sh | sh"
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # 14. Directory structure
@@ -378,13 +438,51 @@ log "Directory structure created"
 # ---------------------------------------------------------------------------
 info "Installing dev CLI..."
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DEV_CLI_REPO="/opt/dev-cli"
 if [ -f "$SCRIPT_DIR/install.sh" ]; then
+  # Running from a cloned repo
   echo N | bash "$SCRIPT_DIR/install.sh"
 else
-  warn "install.sh not found at $SCRIPT_DIR"
-  warn "Run ./install.sh manually from the dev-cli repo"
+  # Running via curl | bash — clone the repo first
+  # Allow overriding branch via DEV_CLI_BRANCH env var (default: main)
+  DEV_CLI_BRANCH="${DEV_CLI_BRANCH:-main}"
+  info "Cloning dev-cli ($DEV_CLI_BRANCH) to $DEV_CLI_REPO..."
+  if [ -d "$DEV_CLI_REPO" ]; then
+    info "Repo already exists at $DEV_CLI_REPO, pulling latest..."
+    git -C "$DEV_CLI_REPO" fetch origin
+    git -C "$DEV_CLI_REPO" checkout "$DEV_CLI_BRANCH"
+    git -C "$DEV_CLI_REPO" pull --ff-only
+  else
+    sudo git clone -b "$DEV_CLI_BRANCH" https://github.com/theholdinco/dev-cli.git "$DEV_CLI_REPO"
+    sudo chown -R "$USER:$USER" "$DEV_CLI_REPO"
+  fi
+  echo N | bash "$DEV_CLI_REPO/install.sh"
 fi
 log "dev CLI installed"
+
+# ---------------------------------------------------------------------------
+# 15b. Register bootstrapping user as admin
+# ---------------------------------------------------------------------------
+_USERS_FILE="/etc/dev-cli/users.json"
+if [ -f "$_USERS_FILE" ]; then
+  _user_count=$(jq '.users | length' "$_USERS_FILE" 2>/dev/null || echo "0")
+  if [ "$_user_count" -eq 0 ]; then
+    info "Registering $USER as admin in the user registry..."
+    _now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    _tmp=$(mktemp)
+    jq --arg u "$USER" --arg t "$_now" \
+      '.users[$u] = {"tailscale_email": "", "role": "admin", "created": $t, "status": "active", "max_sessions": 8, "onboarded": false}' \
+      "$_USERS_FILE" > "$_tmp" \
+      && sudo cp "$_tmp" "$_USERS_FILE" \
+      && sudo chown ":devs" "$_USERS_FILE" \
+      && sudo chmod g+w "$_USERS_FILE" \
+      && rm -f "$_tmp"
+    log "$USER registered as admin. Set your Tailscale email with:"
+    info "  dev admin add-user $USER --tailscale-email your@email.com --role admin"
+  else
+    info "User registry already has $_user_count user(s) — skipping auto-registration"
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # 16. Shell enhancements
@@ -440,136 +538,14 @@ fi
 # ---------------------------------------------------------------------------
 # 18. Multi-user helper (add-dev-user)
 # ---------------------------------------------------------------------------
-info "Installing add-dev-user helper..."
-sudo tee /usr/local/bin/add-dev-user > /dev/null << 'ADD_USER_SCRIPT'
+info "Installing add-dev-user stub (deprecated — use 'dev admin add-user' instead)..."
+sudo tee /usr/local/bin/add-dev-user > /dev/null << 'STUB_SCRIPT'
 #!/usr/bin/env bash
-###############################################################################
-# add-dev-user — Add a new engineer to the shared dev VPS
-#
-# Usage: sudo add-dev-user <username>
-#
-# Creates a Linux user with a temporary password, adds to required groups,
-# installs dev-cli and Claude Code, copies tmux config, and sets up
-# Homebrew in their PATH.
-###############################################################################
-
-set -euo pipefail
-
-if [ "$(id -u)" -ne 0 ]; then
-  echo "Error: Must run as root (sudo add-dev-user <username>)"
-  exit 1
-fi
-
-USERNAME="${1:-}"
-if [ -z "$USERNAME" ]; then
-  echo "Usage: sudo add-dev-user <username>"
-  exit 1
-fi
-
-echo "Creating user: $USERNAME"
-
-# Generate a temporary password
-TEMP_PASS=$(openssl rand -base64 12)
-
-# Create user with home directory
-if id "$USERNAME" &>/dev/null; then
-  echo "User '$USERNAME' already exists, skipping creation"
-else
-  useradd -m -s /bin/bash "$USERNAME"
-  echo "$USERNAME:$TEMP_PASS" | chpasswd
-  echo "  ✓ User created with temporary password"
-fi
-
-# Add to docker, sudo, and devs groups
-usermod -aG docker,sudo,devs "$USERNAME" 2>/dev/null || true
-echo "  ✓ Added to docker, sudo, and devs groups"
-
-# Install dev-cli for the user
-DEV_CLI_REPO="/opt/dev-cli"
-if [ -d "$DEV_CLI_REPO" ]; then
-  su - "$USERNAME" -c "echo N | bash $DEV_CLI_REPO/install.sh" || true
-  echo "  ✓ dev-cli installed"
-else
-  echo "  ! dev-cli repo not found at $DEV_CLI_REPO — install manually"
-fi
-
-# Install Claude Code for the user
-echo "  → Installing Claude Code..."
-su - "$USERNAME" -c 'curl -fsSL https://claude.ai/install.sh | bash' 2>/dev/null || true
-echo "  ✓ Claude Code installed (user must run 'claude login' on first use)"
-
-# Copy tmux config if available
-for tmux_src in /etc/skel/.tmux.conf /home/*/.tmux.conf; do
-  if [ -f "$tmux_src" ]; then
-    cp "$tmux_src" "/home/$USERNAME/.tmux.conf"
-    chown "$USERNAME:$USERNAME" "/home/$USERNAME/.tmux.conf"
-    echo "  ✓ tmux config copied"
-    break
-  fi
-done
-
-# Set up Homebrew in PATH
-BREW_PREFIX="/home/linuxbrew/.linuxbrew"
-if [ -d "$BREW_PREFIX" ]; then
-  if ! grep -q 'linuxbrew' "/home/$USERNAME/.bashrc" 2>/dev/null; then
-    cat >> "/home/$USERNAME/.bashrc" << 'BREW_INIT'
-
-# Homebrew
-eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-BREW_INIT
-    echo "  ✓ Homebrew added to PATH"
-  fi
-fi
-
-# Link shared secrets
-SHARED_SECRETS="/etc/dev-cli/secrets"
-USER_CONFIG="/home/$USERNAME/.config/dev-cli/secrets"
-if [ -d "$SHARED_SECRETS" ]; then
-  mkdir -p "$USER_CONFIG"
-  for secret_file in "$SHARED_SECRETS"/*; do
-    local_name=$(basename "$secret_file")
-    ln -sf "$secret_file" "$USER_CONFIG/$local_name"
-  done
-  chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.config/dev-cli"
-  echo "  ✓ Shared secrets linked"
-else
-  echo "  ! No shared secrets at $SHARED_SECRETS — create them first"
-fi
-
-# Ensure .bashrc sources nvm
-if [ -d "/home/$USERNAME/.nvm" ] || [ -d "$HOME/.nvm" ]; then
-  if ! grep -q 'NVM_DIR' "/home/$USERNAME/.bashrc" 2>/dev/null; then
-    cat >> "/home/$USERNAME/.bashrc" << 'NVM_INIT'
-
-# nvm
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-NVM_INIT
-    echo "  ✓ nvm sourced in .bashrc"
-  fi
-fi
-
-# Force password change on first login (must be after all su - commands)
-chage -d 0 "$USERNAME"
-
-echo ""
-echo "============================================"
-echo "  User '$USERNAME' created successfully!"
-echo "============================================"
-echo ""
-echo "  Temporary password: $TEMP_PASS"
-echo "  (User will be forced to change it on first login)"
-echo ""
-echo "  Next steps:"
-echo "  1. Share the temp password with $USERNAME securely"
-echo "  2. Ensure they are on your Tailscale tailnet"
-echo "  3. They log in:  ssh $USERNAME@$(hostname)"
-echo "  4. They run:     claude login"
-echo "  5. They run:     dev doctor"
-echo ""
-ADD_USER_SCRIPT
+echo "add-dev-user is deprecated. Use: dev admin add-user <username> --tailscale-email <email>"
+exit 1
+STUB_SCRIPT
 sudo chmod +x /usr/local/bin/add-dev-user
-log "add-dev-user helper installed at /usr/local/bin/add-dev-user"
+warn "add-dev-user is now a stub. Use 'dev admin add-user' for multi-user setup."
 
 # ---------------------------------------------------------------------------
 # 19. Web dashboard & bot services

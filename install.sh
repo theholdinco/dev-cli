@@ -38,14 +38,26 @@ mkdir -p "$HOME/images"
 # Install binaries (atomic mv so a running 'dev' process isn't corrupted mid-read)
 cp "$REPO_DIR/bin/dev" "$BIN_DIR/dev.new"
 cp "$REPO_DIR/bin/dev-hub" "$BIN_DIR/dev-hub.new"
+cp "$REPO_DIR/bin/dev-admin" "$BIN_DIR/dev-admin.new"
 cp "$REPO_DIR/bin/claude-tg-notify" "$BIN_DIR/claude-tg-notify.new"
 cp "$REPO_DIR/bin/dev-task-runner" "$BIN_DIR/dev-task-runner.new"
-chmod +x "$BIN_DIR/dev.new" "$BIN_DIR/dev-hub.new" "$BIN_DIR/claude-tg-notify.new" "$BIN_DIR/dev-task-runner.new"
+chmod +x "$BIN_DIR/dev.new" "$BIN_DIR/dev-hub.new" "$BIN_DIR/dev-admin.new" "$BIN_DIR/claude-tg-notify.new" "$BIN_DIR/dev-task-runner.new"
 mv "$BIN_DIR/dev.new" "$BIN_DIR/dev"
 mv "$BIN_DIR/dev-hub.new" "$BIN_DIR/dev-hub"
+mv "$BIN_DIR/dev-admin.new" "$BIN_DIR/dev-admin"
 mv "$BIN_DIR/claude-tg-notify.new" "$BIN_DIR/claude-tg-notify"
 mv "$BIN_DIR/dev-task-runner.new" "$BIN_DIR/dev-task-runner"
-log "Installed dev, dev-hub, claude-tg-notify, and dev-task-runner to $BIN_DIR/"
+log "Installed dev, dev-hub, dev-admin, claude-tg-notify, and dev-task-runner to $BIN_DIR/"
+
+# Install lib files
+mkdir -p "$HOME/.local/lib/dev-cli"
+cp "$REPO_DIR/lib/auth.sh" "$REPO_DIR/lib/audit.sh" "$HOME/.local/lib/dev-cli/"
+log "Installed lib files to $HOME/.local/lib/dev-cli/"
+
+# Write version
+VERSION=$(git -C "$REPO_DIR" describe --tags --always 2>/dev/null || echo "dev")
+echo "$VERSION" > "$BIN_DIR/.dev-version"
+log "Version: $VERSION"
 
 # Install web dashboard files
 WEB_DIR="$HOME/.local/share/dev-cli/web"

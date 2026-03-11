@@ -36,6 +36,15 @@ PREVIEW_LINES=8
 SHOW_ALL=true  # show all users by default in hub
 GLOBAL_CONFIG="$CONFIG_DIR/config.json"
 
+# Source auth helpers if available (for role badges)
+_hub_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -d "$_hub_script_dir/../lib/dev-cli" ]]; then
+    _HUB_LIB_DIR="$_hub_script_dir/../lib/dev-cli"
+elif [[ -d "$_hub_script_dir/../lib" ]]; then
+    _HUB_LIB_DIR="$_hub_script_dir/../lib"
+fi
+[[ -n "${_HUB_LIB_DIR:-}" && -f "$_HUB_LIB_DIR/auth.sh" ]] && source "$_HUB_LIB_DIR/auth.sh"
+
 # ── Config Helpers ─────────────────────────────────────────
 
 # Read a keybind from config, falling back to provided default
@@ -235,7 +244,11 @@ render() {
   else
     filter_label="$USER only"
   fi
-  echo -e "  ${DIM}$count/$MAX_SLOTS slots · $ip · $filter_label${NC}"
+  local footer_role=""
+  if type is_admin &>/dev/null && is_admin "$USER" 2>/dev/null; then
+    footer_role=" (admin)"
+  fi
+  echo -e "  ${DIM}$count/$MAX_SLOTS slots · $ip · $filter_label · $USER${footer_role}${NC}"
   echo ""
 
   # Build active sessions list (index-based selection, not slot-based)
@@ -306,9 +319,15 @@ render() {
         local display_name
         display_name=$(printf "%-24s" "$name")
 
+        local role_badge=""
+        if type get_user_role &>/dev/null; then
+          local owner_role
+          owner_role=$(get_user_role "$owner" 2>/dev/null || echo "")
+          [[ "$owner_role" == "admin" ]] && role_badge=" [A]"
+        fi
         local owner_badge=""
         if [ "$SHOW_ALL" = true ] && [ -n "$owner" ]; then
-          owner_badge="${DIM}[$owner]${NC} "
+          owner_badge="${DIM}[$owner${role_badge}]${NC} "
         fi
 
         local port_display

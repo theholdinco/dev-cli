@@ -86,6 +86,17 @@ DEFAULT_CONFIG='{
   }
 }'
 
+# ── Library Loading ─────────────────────────────────────────────────────────
+# Source libraries if available
+_dev_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -d "$_dev_script_dir/../lib/dev-cli" ]]; then
+    LIB_DIR="$_dev_script_dir/../lib/dev-cli"
+elif [[ -d "$_dev_script_dir/../lib" ]]; then
+    LIB_DIR="$_dev_script_dir/../lib"
+fi
+[[ -n "${LIB_DIR:-}" && -f "$LIB_DIR/auth.sh" ]] && source "$LIB_DIR/auth.sh"
+[[ -n "${LIB_DIR:-}" && -f "$LIB_DIR/audit.sh" ]] && source "$LIB_DIR/audit.sh"
+
 # ── Terminal Detection ─────────────────────────────────────────────────────
 term_width() { tput cols 2>/dev/null || echo 80; }
 is_compact() { [[ $(term_width) -lt 90 ]]; }
@@ -424,6 +435,28 @@ slot_ports() {
   local supa_db=$((BASE_SUPA_DB_PORT + offset * SUPA_PORT_GAP))
   local supa_studio=$((BASE_SUPA_STUDIO_PORT + offset * SUPA_PORT_GAP))
   echo "$frontend $backend $supa_api $supa_db $supa_studio"
+}
+
+# Set up authbind for a user's allocated ports
+setup_authbind_ports() {
+    local username="$1" frontend_port="$2" backend_port="$3" supa_api_port="$4" supa_db_port="$5" supa_studio_port="$6"
+    local ports=("$frontend_port" "$backend_port" "$supa_api_port" "$supa_db_port" "$supa_studio_port")
+    for port in "${ports[@]}"; do
+        [[ "$port" == "null" || -z "$port" ]] && continue
+        sudo touch "/etc/authbind/byport/$port" 2>/dev/null || true
+        sudo chown "$username" "/etc/authbind/byport/$port" 2>/dev/null || true
+        sudo chmod 500 "/etc/authbind/byport/$port" 2>/dev/null || true
+    done
+}
+
+# Clean up authbind for deallocated ports
+cleanup_authbind_ports() {
+    local frontend_port="$1" backend_port="$2" supa_api_port="$3" supa_db_port="$4" supa_studio_port="$5"
+    local ports=("$frontend_port" "$backend_port" "$supa_api_port" "$supa_db_port" "$supa_studio_port")
+    for port in "${ports[@]}"; do
+        [[ "$port" == "null" || -z "$port" ]] && continue
+        sudo rm -f "/etc/authbind/byport/$port" 2>/dev/null || true
+    done
 }
 
 # Register a session in the port registry
@@ -1542,6 +1575,19 @@ cmd_new() {
   local name
   name=$(session_name "$project" "$branch")
 
+  # Check user status and session limit
+  if type get_user_status &>/dev/null && type has_user_registry &>/dev/null && has_user_registry; then
+    local _status
+    _status=$(get_user_status "$USER" 2>/dev/null || echo "active")
+    [[ "$_status" == "active" ]] || die "Your account is $_status. Contact your admin."
+  fi
+  if type can_create_session &>/dev/null && ! can_create_session "$USER"; then
+    local _max _current
+    _max=$(get_user_max_sessions "$USER")
+    _current=$(count_user_sessions "$USER")
+    die "Session limit reached ($_current/$_max). Kill an existing session or ask admin to increase your limit."
+  fi
+
   # Validate
   [ -d "$bare_dir" ] || die "Project '$project' not found. Run 'dev setup $project <url>' first."
   [ -z "$(get_session "$name")" ] || die "Session '$name' already exists. Run 'dev kill $name' first."
@@ -1596,6 +1642,11 @@ cmd_new() {
   local ports
   ports=$(slot_ports "$slot")
   read -r wt_frontend wt_backend wt_supa_api wt_supa_db wt_supa_studio <<< "$ports"
+
+  # Set up port isolation
+  if command -v authbind &>/dev/null && type setup_authbind_ports &>/dev/null; then
+    setup_authbind_ports "$USER" "$wt_frontend" "$wt_backend" "$wt_supa_api" "$wt_supa_db" "$wt_supa_studio"
+  fi
 
   # Check project config to determine which ports are needed
   local proj_config="$CONFIG_DIR/projects/${project}.json"
@@ -1695,6 +1746,7 @@ cmd_new() {
 
   # Register in port registry (include container_id if present)
   register_session "$name" "$project" "$branch" "$slot" "$agent" "$worktree_path" "$private"
+  type audit_log &>/dev/null && audit_log "$USER" "session.create" "$name" "$(jq -nc --arg p "$project" --arg b "$branch" '{project:$p,branch:$b}')"
 
   # Store container info in registry if container mode
   if [ -n "$container_id" ]; then
@@ -2068,6 +2120,7 @@ cmd_attach() {
     fi
   fi
 
+  type audit_log &>/dev/null && audit_log "$USER" "session.attach" "$match" '{}'
   tmux attach-session -t "$match"
 }
 
@@ -2268,7 +2321,16 @@ cmd_kill() {
       rm -rf "$worktree_path"
       log "Removed ghost directory"
     fi
+    if command -v authbind &>/dev/null && type cleanup_authbind_ports &>/dev/null; then
+      cleanup_authbind_ports \
+        "$(get_session_field "$name" "ports.frontend" 2>/dev/null || true)" \
+        "$(get_session_field "$name" "ports.backend" 2>/dev/null || true)" \
+        "$(get_session_field "$name" "ports.supa_api" 2>/dev/null || true)" \
+        "$(get_session_field "$name" "ports.supa_db" 2>/dev/null || true)" \
+        "$(get_session_field "$name" "ports.supa_studio" 2>/dev/null || true)"
+    fi
     unregister_session "$name"
+    type audit_log &>/dev/null && audit_log "$USER" "session.kill" "$name" '{}'
     log "Session '$name' fully cleaned up"
     random_farewell
     return 0
@@ -2309,7 +2371,16 @@ cmd_kill() {
       rm -rf "$worktree_path"
       log "Removed scaffold directory"
     fi
+    if command -v authbind &>/dev/null && type cleanup_authbind_ports &>/dev/null; then
+      cleanup_authbind_ports \
+        "$(get_session_field "$name" "ports.frontend" 2>/dev/null || true)" \
+        "$(get_session_field "$name" "ports.backend" 2>/dev/null || true)" \
+        "$(get_session_field "$name" "ports.supa_api" 2>/dev/null || true)" \
+        "$(get_session_field "$name" "ports.supa_db" 2>/dev/null || true)" \
+        "$(get_session_field "$name" "ports.supa_studio" 2>/dev/null || true)"
+    fi
     unregister_session "$name"
+    type audit_log &>/dev/null && audit_log "$USER" "session.kill" "$name" '{}'
     log "Session '$name' fully cleaned up"
     random_farewell
     return 0
@@ -2364,8 +2435,20 @@ cmd_kill() {
     fi
   fi
 
+  # Clean up port isolation
+  if command -v authbind &>/dev/null && type cleanup_authbind_ports &>/dev/null; then
+    local _kill_fp _kill_bp _kill_sap _kill_sdp _kill_ssp
+    _kill_fp=$(get_session_field "$name" "ports.frontend" 2>/dev/null || echo "")
+    _kill_bp=$(get_session_field "$name" "ports.backend" 2>/dev/null || echo "")
+    _kill_sap=$(get_session_field "$name" "ports.supa_api" 2>/dev/null || echo "")
+    _kill_sdp=$(get_session_field "$name" "ports.supa_db" 2>/dev/null || echo "")
+    _kill_ssp=$(get_session_field "$name" "ports.supa_studio" 2>/dev/null || echo "")
+    cleanup_authbind_ports "$_kill_fp" "$_kill_bp" "$_kill_sap" "$_kill_sdp" "$_kill_ssp"
+  fi
+
   # Unregister
   unregister_session "$name"
+  type audit_log &>/dev/null && audit_log "$USER" "session.kill" "$name" '{}'
   log "Session '$name' fully cleaned up"
   random_farewell
 }
@@ -3396,7 +3479,7 @@ cmd_doctor() {
 
   # Check required tools
   echo -e "  ${BOLD}Tools${NC}"
-  for tool in jq tmux git gh lazygit delta docker tailscale devcontainer; do
+  for tool in jq tmux git gh lazygit delta docker tailscale; do
     if command -v "$tool" &>/dev/null; then
       echo -e "  ${GREEN}✓${NC} $tool $(command -v "$tool")"
       ok=$((ok + 1))
@@ -3405,6 +3488,14 @@ cmd_doctor() {
       fail=$((fail + 1))
     fi
   done
+  # Optional: devcontainer CLI (only needed for --container mode)
+  if command -v devcontainer &>/dev/null; then
+    echo -e "  ${GREEN}✓${NC} devcontainer $(command -v devcontainer)"
+    ok=$((ok + 1))
+  else
+    echo -e "  ${YELLOW}○${NC} devcontainer — not installed (optional, needed for: dev new --container)"
+    warn_count=$((warn_count + 1))
+  fi
   echo ""
 
   # Docker daemon
@@ -3528,7 +3619,46 @@ cmd_doctor() {
   fi
   echo ""
 
+  # --- Security checks (multi-user mode only) ---
+  if type has_user_registry &>/dev/null && has_user_registry; then
+      echo ""
+      echo -e "  ${BOLD}Security:${NC}"
+
+      if is_user_registered "$USER"; then
+          local role status
+          role=$(get_user_role "$USER")
+          status=$(get_user_status "$USER")
+          echo -e "  ${GREEN}✓${NC} User registration: $USER (role: $role, status: $status)"
+          ok=$((ok + 1))
+      else
+          echo -e "  ${RED}✗${NC} User registration: $USER not in registry"
+          fail=$((fail + 1))
+      fi
+
+      if command -v authbind &>/dev/null; then
+          echo -e "  ${GREEN}✓${NC} Port isolation: authbind installed"
+          ok=$((ok + 1))
+      else
+          echo -e "  ${YELLOW}⚠${NC} Port isolation: authbind not installed"
+          warn_count=$((warn_count + 1))
+      fi
+
+      if [[ -f /usr/local/bin/validate-tailscale-identity ]]; then
+          echo -e "  ${GREEN}✓${NC} SSH binding: identity validation installed"
+          ok=$((ok + 1))
+      else
+          echo -e "  ${YELLOW}⚠${NC} SSH binding: not configured"
+          warn_count=$((warn_count + 1))
+      fi
+
+      local current max
+      current=$(count_user_sessions "$USER")
+      max=$(get_user_max_sessions "$USER")
+      echo -e "  ${GREEN}✓${NC} Session limit: $current/$max sessions"
+  fi
+
   # Summary
+  echo ""
   echo -e "  ─────────────────────────────────"
   echo -e "  ${GREEN}$ok passed${NC}  ${YELLOW}$warn_count warnings${NC}  ${RED}$fail failed${NC}"
   echo ""
@@ -6679,6 +6809,113 @@ cmd_lenny() {
   echo ""
 }
 
+cmd_setup_account() {
+    echo -e "${BOLD}Welcome to dev-cli! Let's set up your account.${NC}"
+    echo ""
+
+    # Step 1: Check user registration
+    if type is_user_registered &>/dev/null && has_user_registry; then
+        if ! is_user_registered "$USER"; then
+            die "Your account ($USER) is not registered. Ask your admin to run: dev admin add-user $USER --tailscale-email <your-email>"
+        fi
+
+        local status
+        status=$(get_user_status "$USER")
+        if [[ "$status" != "active" ]]; then
+            die "Your account is $status. Contact your admin."
+        fi
+
+        local email
+        email=$(get_user_field "$USER" "tailscale_email")
+        log "Account registered as: $USER <$email>"
+    else
+        info "Running in single-user mode (no user registry)"
+    fi
+
+    # Step 2: Tailscale verification
+    echo ""
+    info "Checking Tailscale..."
+    if command -v tailscale &>/dev/null; then
+        if tailscale status --self &>/dev/null; then
+            local ts_ip
+            ts_ip=$(tailscale ip -4 2>/dev/null || echo "unknown")
+            log "Tailscale connected (IP: $ts_ip)"
+        else
+            warn "Tailscale is installed but not connected."
+            echo "  Run: sudo tailscale up"
+            echo "  Then re-run: dev setup-account"
+            return 1
+        fi
+    else
+        warn "Tailscale not installed. Ask your admin for setup instructions."
+    fi
+
+    # Step 3: GitHub auth
+    echo ""
+    info "Checking GitHub CLI..."
+    if command -v gh &>/dev/null; then
+        if gh auth status &>/dev/null 2>&1; then
+            local gh_user
+            gh_user=$(gh api user --jq '.login' 2>/dev/null || echo "unknown")
+            log "GitHub authenticated as: $gh_user"
+        else
+            warn "GitHub CLI not authenticated."
+            echo "  Run: gh auth login"
+            echo ""
+            read -rp "Would you like to authenticate now? [Y/n] " answer
+            if [[ "${answer:-y}" =~ ^[Yy] ]]; then
+                gh auth login
+            fi
+        fi
+    else
+        warn "GitHub CLI (gh) not installed."
+    fi
+
+    # Step 4: Claude auth
+    echo ""
+    info "Checking Claude Code..."
+    if command -v claude &>/dev/null; then
+        # Check if claude has valid auth
+        if [[ -f "$HOME/.config/dev-cli/secrets.env" ]]; then
+            if grep -q "CLAUDE_CODE_OAUTH_TOKEN\|ANTHROPIC_API_KEY" "$HOME/.config/dev-cli/secrets.env" 2>/dev/null; then
+                log "Claude Code credentials found in secrets.env"
+            else
+                warn "No Claude credentials in secrets.env"
+                echo "  Run: claude login"
+                echo ""
+                read -rp "Would you like to authenticate now? [Y/n] " answer
+                if [[ "${answer:-y}" =~ ^[Yy] ]]; then
+                    claude login
+                fi
+            fi
+        else
+            warn "No secrets.env found."
+        fi
+    else
+        warn "Claude Code not installed."
+        echo "  Run: curl -fsSL https://claude.ai/install.sh | sh"
+    fi
+
+    # Step 5: Run doctor
+    echo ""
+    info "Running health check..."
+    cmd_doctor
+
+    # Step 6: Mark as onboarded
+    if type set_user_field_raw &>/dev/null && has_user_registry; then
+        set_user_field_raw "$USER" "onboarded" "true"
+    fi
+
+    echo ""
+    log "Account setup complete!"
+    echo ""
+    echo "Quick start:"
+    echo "  dev init <project>     Set up a project for the first time"
+    echo "  dev new <branch>       Start a new session"
+    echo "  dev hub                Launch the interactive dashboard"
+    echo "  dev help               See all commands"
+}
+
 cmd_help() {
   cat << 'HELPEOF'
 
@@ -6916,6 +7153,13 @@ cmd_help() {
     dev fortune                             Random dev joke / wisdom
     dev lenny                               Random lenny face (essential tooling)
 
+  ADMIN
+    dev admin <cmd>    Admin commands (user management, monitoring, operations)
+                       Run 'dev admin help' for details
+
+  GETTING STARTED
+    dev setup-account  Interactive first-time account setup
+
   TMUX CHEATSHEET (inside a session)
     Ctrl+a d          Detach (session keeps running)
     Ctrl+a s          Switch between sessions
@@ -6981,6 +7225,9 @@ case "${1:-help}" in
   vibes)     cmd_vibes ;;
   fortune)   cmd_fortune ;;
   lenny)     cmd_lenny ;;
+  admin)          shift; bash "$_dev_script_dir/dev-admin" "$@" ;;
+  setup-account)  cmd_setup_account "$@" ;;
+  --version|-v)   echo "dev-cli $(cat "$_dev_script_dir/.dev-version" 2>/dev/null || echo "unknown")"; exit 0 ;;
   help|-h|--help) cmd_help ;;
   *)         die "Unknown command: $1. Run 'dev help' for usage." ;;
 esac
