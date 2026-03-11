@@ -403,10 +403,18 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Claude Code is per-user (each engineer installs + logs in with their own subscription)
+# 13b. Claude Code (per-user install for the bootstrapping admin)
 # ---------------------------------------------------------------------------
-info "Claude Code is per-user. Each engineer runs:"
-info "  curl -fsSL https://claude.ai/install.sh | bash && claude login"
+if command -v claude &>/dev/null; then
+  log "Claude Code already installed"
+else
+  info "Installing Claude Code..."
+  if curl -fsSL https://cli.claude.ai/install.sh | sh; then
+    log "Claude Code installed — run 'claude' to authenticate"
+  else
+    warn "Claude Code install failed — run manually: curl -fsSL https://cli.claude.ai/install.sh | sh"
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # 14. Directory structure
