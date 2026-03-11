@@ -2147,7 +2147,7 @@ cmd_kill() {
 
   if [ "$kill_all" = true ]; then
     local sessions
-    sessions=$(jq -r --arg user "$USER" '[to_entries[] | select(.value.private != true or .value.owner == $user or .value.owner == null)] | .[].key' "$PORT_REGISTRY" 2>/dev/null)
+    sessions=$(jq -r --arg user "$USER" '[to_entries[] | select(.value.owner == $user or .value.owner == null)] | .[].key' "$PORT_REGISTRY" 2>/dev/null)
     if [ -z "$sessions" ]; then
       echo "No sessions to kill."
       return 0
@@ -2172,7 +2172,7 @@ cmd_kill() {
 
   if [ -n "$kill_project" ] && [ "$kill_project" != "__NEXT__" ]; then
     local sessions
-    sessions=$(jq -r --arg user "$USER" --arg proj "$kill_project" 'to_entries[] | select(.value.project == $proj) | select(.value.private != true or .value.owner == $user or .value.owner == null) | .key' "$PORT_REGISTRY" 2>/dev/null)
+    sessions=$(jq -r --arg user "$USER" --arg proj "$kill_project" 'to_entries[] | select(.value.project == $proj) | select(.value.owner == $user or .value.owner == null) | .key' "$PORT_REGISTRY" 2>/dev/null)
     if [ -z "$sessions" ]; then
       echo "No sessions for project '$kill_project'."
       return 0
@@ -2198,9 +2198,9 @@ cmd_kill() {
   local name="${positional[1]:-}"
   [ -z "$name" ] && die "Usage: dev kill <session> [--all] [--project <name>] [-f|--force]"
 
-  # Support partial matching — collect all matches
+  # Support partial matching — collect all matches (only current user's sessions)
   local matches
-  matches=$(jq -r "keys[] | select(contains(\"$name\"))" "$PORT_REGISTRY")
+  matches=$(jq -r --arg name "$name" --arg user "$USER" 'to_entries[] | select(.key | contains($name)) | select(.value.owner == $user or .value.owner == null) | .key' "$PORT_REGISTRY")
 
   if [ -z "$matches" ]; then
     warn "Session '$name' not found in registry"
@@ -2291,10 +2291,7 @@ cmd_kill() {
   local session_owner
   session_owner=$(get_session_field "$name" "owner")
   if [ -n "$session_owner" ] && [ "$session_owner" != "$USER" ]; then
-    echo ""
-    echo -ne "  ${YELLOW}Session '$name' belongs to $session_owner. Kill anyway? [y/N]:${NC} "
-    read -r confirm
-    [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || { echo "  Cancelled."; return 0; }
+    die "Session '$name' belongs to $session_owner. You can only kill your own sessions."
   fi
 
   local worktree_path project
