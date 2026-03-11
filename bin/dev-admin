@@ -76,6 +76,13 @@ cmd_admin_add_user() {
     [[ -n "$email" ]] || die "Missing --tailscale-email"
     [[ "$role" == "admin" || "$role" == "user" ]] || die "Role must be 'admin' or 'user'"
 
+    # Warn if the caller isn't registered yet — adding someone else will lock them out
+    if has_user_registry && ! is_user_registered "$USER"; then
+        warn "You ($USER) are not registered. Adding '$username' will lock you out."
+        warn "Register yourself first: dev admin add-user $USER --tailscale-email <your-email> --role admin"
+        die "Aborted to prevent lockout"
+    fi
+
     # Check if user already exists in registry
     if is_user_registered "$username"; then
         die "User '$username' is already registered"
