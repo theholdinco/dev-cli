@@ -6893,7 +6893,7 @@ cmd_setup_account() {
         fi
     else
         warn "Claude Code not installed."
-        echo "  Run: curl -fsSL https://cli.claude.ai/install.sh | sh"
+        echo "  Run: curl -fsSL https://claude.ai/install.sh | sh"
     fi
 
     # Step 5: Run doctor

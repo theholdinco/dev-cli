@@ -409,10 +409,10 @@ if command -v claude &>/dev/null; then
   log "Claude Code already installed"
 else
   info "Installing Claude Code..."
-  if curl -fsSL https://cli.claude.ai/install.sh | sh; then
+  if curl -fsSL https://claude.ai/install.sh | sh; then
     log "Claude Code installed — run 'claude' to authenticate"
   else
-    warn "Claude Code install failed — run manually: curl -fsSL https://cli.claude.ai/install.sh | sh"
+    warn "Claude Code install failed — run manually: curl -fsSL https://claude.ai/install.sh | sh"
   fi
 fi
 
