@@ -409,12 +409,10 @@ if command -v claude &>/dev/null; then
   log "Claude Code already installed"
 else
   info "Installing Claude Code..."
-  if command -v npm &>/dev/null && npm install -g @anthropic-ai/claude-code 2>/dev/null; then
-    log "Claude Code installed — run 'claude' to authenticate"
-  elif curl -fsSL https://cli.claude.ai/install.sh | sh 2>/dev/null; then
+  if curl -fsSL https://cli.claude.ai/install.sh | sh; then
     log "Claude Code installed — run 'claude' to authenticate"
   else
-    warn "Claude Code install failed — run manually: npm install -g @anthropic-ai/claude-code"
+    warn "Claude Code install failed — run manually: curl -fsSL https://cli.claude.ai/install.sh | sh"
   fi
 fi
 

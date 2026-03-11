@@ -126,8 +126,7 @@ cmd_admin_add_user() {
 
     # Install Claude Code
     info "Installing Claude Code for '$username'..."
-    sudo -u "$username" bash -c 'npm install -g @anthropic-ai/claude-code 2>/dev/null || curl -fsSL https://cli.claude.ai/install.sh | sh 2>/dev/null' \
-        || warn "Claude Code install failed — user can run: npm install -g @anthropic-ai/claude-code"
+    sudo -u "$username" bash -c 'curl -fsSL https://cli.claude.ai/install.sh | sh' 2>/dev/null || warn "Claude Code install failed — user can run manually: curl -fsSL https://cli.claude.ai/install.sh | sh"
 
     # Link shared secrets
     if [[ -d /etc/dev-cli/secrets ]]; then
