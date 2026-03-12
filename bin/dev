@@ -2397,36 +2397,42 @@ cmd_kill() {
 
   if [ -d "$worktree_path" ]; then
     info "Removing worktree..."
-    cd "$bare_dir"
-    git worktree remove "$worktree_path" --force 2>/dev/null || {
-      warn "git worktree remove failed, cleaning up manually"
+    if [ -d "$bare_dir" ]; then
+      cd "$bare_dir"
+      git worktree remove "$worktree_path" --force 2>/dev/null || {
+        warn "git worktree remove failed, cleaning up manually"
+        rm -rf "$worktree_path"
+      }
+    else
       rm -rf "$worktree_path"
-    }
+    fi
     log "Worktree removed"
   fi
 
   # Always prune stale worktree metadata so the branch is no longer "checked out"
-  cd "$bare_dir"
-  git worktree prune 2>/dev/null || true
+  if [ -d "$bare_dir" ]; then
+    cd "$bare_dir"
+    git worktree prune 2>/dev/null || true
 
-  # Delete the local branch so the same branch name can be reused with dev new.
-  # Remote branch is untouched — only the local ref is removed.
-  # Skip for ask sessions (they use detached HEAD, no local branch to delete).
-  if [ -n "$branch" ] && [ "$session_type" != "ask" ]; then
-    if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
-      # Try safe delete first (fails if branch has unmerged/unpushed commits)
-      if git branch -d "$branch" 2>/dev/null; then
-        log "Deleted local branch '$branch'"
-      else
-        # Branch has unpushed work — ask before force-deleting
-        echo ""
-        warn "Branch '$branch' has commits not pushed to origin."
-        echo -ne "  ${YELLOW}Delete local branch anyway? [y/N]:${NC} "
-        read -r confirm
-        if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-          git branch -D "$branch" 2>/dev/null && log "Force-deleted local branch '$branch'" || warn "Could not delete local branch '$branch'"
+    # Delete the local branch so the same branch name can be reused with dev new.
+    # Remote branch is untouched — only the local ref is removed.
+    # Skip for ask sessions (they use detached HEAD, no local branch to delete).
+    if [ -n "$branch" ] && [ "$session_type" != "ask" ]; then
+      if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+        # Try safe delete first (fails if branch has unmerged/unpushed commits)
+        if git branch -d "$branch" 2>/dev/null; then
+          log "Deleted local branch '$branch'"
         else
-          warn "Kept local branch '$branch'. You may need to manually prune it before reusing this branch name."
+          # Branch has unpushed work — ask before force-deleting
+          echo ""
+          warn "Branch '$branch' has commits not pushed to origin."
+          echo -ne "  ${YELLOW}Delete local branch anyway? [y/N]:${NC} "
+          read -r confirm
+          if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+            git branch -D "$branch" 2>/dev/null && log "Force-deleted local branch '$branch'" || warn "Could not delete local branch '$branch'"
+          else
+            warn "Kept local branch '$branch'. You may need to manually prune it before reusing this branch name."
+          fi
         fi
       fi
     fi
@@ -3369,12 +3375,16 @@ cmd_gc() {
     fi
 
     # Remove worktree
-    if [ -d "$worktree_path" ] && [ -d "$bare_dir" ]; then
+    if [ -d "$bare_dir" ]; then
       cd "$bare_dir"
-      git worktree remove "$worktree_path" --force 2>/dev/null || {
-        rm -rf "$worktree_path"
-        git worktree prune
-      }
+      if [ -d "$worktree_path" ]; then
+        git worktree remove "$worktree_path" --force 2>/dev/null || {
+          rm -rf "$worktree_path"
+        }
+      fi
+      git worktree prune 2>/dev/null || true
+    elif [ -d "$worktree_path" ]; then
+      rm -rf "$worktree_path"
     fi
 
     # Unregister
