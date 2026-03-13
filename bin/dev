@@ -399,6 +399,41 @@ slugify() {
   echo "$1" | sed 's/[^a-zA-Z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//' | tr '[:upper:]' '[:lower:]'
 }
 
+# Generate a random 3-word slug for human-readable session names
+random_slug() {
+  local words=(
+    amber apex arch aspen atlas
+    bark beam birch blaze bloom bolt bone breeze brook
+    cape cedar chain chalk chip clay cliff cloud clover coal coral crest crow
+    dale dawn deer delta dew dock drift dune dusk
+    eagle echo edge elder elm ember
+    falcon fern flame flare flint flora forge fox frost
+    gale gate gem ghost glade glen glow gorge grain grove
+    halo hawk hazel haze heath hedge heron hill holly horizon husk
+    iron isle ivory ivy
+    jade jasper jewel juniper
+    kite knoll
+    lake lark latch lava leaf ledge lily linen lotus
+    maple marsh meadow mist moon moss
+    nectar nest night nimbus noble north nova
+    oak oasis ocean onyx orbit
+    palm path peak pearl pebble pier pine plume pond prism pulse
+    quartz quest quill
+    rain range rapid raven reef ridge river rock root rose rust
+    sage sand scope seal shade shell shore silk slate smoke snow spark spire spruce star steel stone storm stump summit
+    thorn tide timber torch trail tulip tusk
+    vale vault velvet vine vista
+    wade walnut wave wheat willow wind wren
+    yarn yew
+    zeal zinc
+  )
+  local n=${#words[@]}
+  local w1=${words[$((RANDOM % n))]}
+  local w2=${words[$((RANDOM % n))]}
+  local w3=${words[$((RANDOM % n))]}
+  echo "${w1}-${w2}-${w3}"
+}
+
 # Session name: user-project-branch
 # For task branches (task-N or task-N/...), use only "task-N" to keep names short
 session_name() {
@@ -5742,11 +5777,10 @@ cmd_ask() {
   cd "$bare_dir"
   base_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo "main")
 
-  local ts
-  ts=$(date +%s)
-  local slug="ask-${ts}"
+  local slug
+  slug="ask-$(random_slug)"
   local wt_dir="$PROJECTS_DIR/${project}-worktrees"
-  local tmp_path="$wt_dir/.ask-$ts"
+  local tmp_path="$wt_dir/.${slug}"
   local name="${USER}-${project}-${slug}"
 
   # Check for existing ask session
@@ -5889,14 +5923,12 @@ cmd_ghost() {
   done
 
   # Generate session name
-  local ts
-  ts=$(date +%s)
   if [ -n "$name_suffix" ]; then
     local slug
     slug=$(slugify "$name_suffix")
     local name="${USER}-ghost-${slug}"
   else
-    local name="${USER}-ghost-${ts}"
+    local name="${USER}-ghost-$(random_slug)"
   fi
 
   # Check for existing session with same name
