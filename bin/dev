@@ -4591,6 +4591,94 @@ cmd_agent() {
   esac
 }
 
+# Launch a new tmux window with a specific agent in an existing session.
+# Usage: cmd_launch_agent <agent_type> "$@"
+# Called by `dev claude [name]` and `dev codex [name]`.
+cmd_launch_agent() {
+  local agent_type="$1"
+  shift  # drop agent_type
+  local session_name="${2:-}"
+  local yolo=false prompt=""
+  shift 2 || shift $# || true
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --yolo|-y) yolo=true; shift ;;
+      *) [ -z "$prompt" ] && prompt="$1"; shift ;;
+    esac
+  done
+
+  [ -z "$session_name" ] && die "Usage: dev $agent_type <session> [--yolo] [prompt]"
+
+  # Find session (partial matching)
+  local match
+  match=$(jq -r "keys[] | select(contains(\"$session_name\"))" "$PORT_REGISTRY" | head -1)
+  [ -z "$match" ] && die "No session matching '$session_name'"
+
+  # Check if tmux session is alive
+  tmux has-session -t "$match" 2>/dev/null || die "Session '$match' is not running"
+
+  local worktree_path
+  worktree_path=$(get_session_field "$match" "path")
+
+  # Build agent command (container-aware)
+  local cid
+  cid=$(get_session_field "$match" "container_id")
+
+  # Source secrets — skip in container mode
+  local env_prefix=""
+  if [ -z "$cid" ]; then
+    env_prefix=$(build_env_prefix)
+  fi
+
+  if [[ "$agent_type" == *claude* ]]; then
+    validate_claude_auth || true
+  fi
+
+  # Resolve yolo from project config if not set via flag
+  local project claude_flags=""
+  project=$(get_session_field "$match" "project")
+  if [ "$yolo" = false ] && [ -n "$project" ] && [ -f "$CONFIG_DIR/projects/${project}.json" ]; then
+    local config_yolo
+    config_yolo=$(jq -r '.skip_permissions // false' "$CONFIG_DIR/projects/${project}.json")
+    [ "$config_yolo" = "true" ] && yolo=true
+  fi
+  if [ "$yolo" = true ] && [ "$agent_type" = "claude" ]; then
+    claude_flags=" --dangerously-skip-permissions"
+    [ -z "$cid" ] && ensure_claude_skip_prompt
+  fi
+
+  # Trust only needed on host
+  [ -z "$cid" ] && [ "$agent_type" = "claude" ] && ensure_claude_trust "$worktree_path"
+  if [ -n "$cid" ]; then
+    if ! docker inspect "$cid" --format '{{.State.Status}}' 2>/dev/null | grep -q "running"; then
+      die "Container ${cid:0:12} is not running. Use 'dev restart $match' to restart the session."
+    fi
+  fi
+
+  local prompt_arg=""
+  [ -n "$prompt" ] && prompt_arg=" \"$prompt\""
+
+  local agent_cmd
+  agent_cmd=$(build_agent_cmd "$agent_type" "$worktree_path" "$cid" "$claude_flags" "$prompt_arg")
+
+  # Create new tmux window
+  tmux new-window -t "$match" -n "agent-${agent_type}" "${env_prefix}${agent_cmd}"
+
+  # Update port registry agents array
+  if ! has_agent "$match" "$agent_type"; then
+    local tmp
+    tmp=$(mktemp)
+    jq --arg name "$match" --arg agent_type "$agent_type" \
+      '(.[$name].agents // [.[$name].agent]) as $current |
+       .[$name].agents = ($current + [$agent_type] | unique)' \
+      "$PORT_REGISTRY" > "$tmp"
+    mv -f "$tmp" "$PORT_REGISTRY"
+    fix_registry_perms
+  fi
+
+  log "Launched $agent_type in session '$match'"
+}
+
 cmd_web() {
   local subcmd="${2:-help}"
   case "$subcmd" in
@@ -7015,6 +7103,8 @@ cmd_help() {
     dev dashboard                           Split-pane view of all agents (read-only)
 
   AGENTS (dual agent support)
+    dev claude <session> [--yolo] [prompt]  Open a new Claude window in a session
+    dev codex <session> [prompt]            Open a new Codex window in a session
     dev agent add <session> <claude|codex>  Add a second agent to a running session
     dev agent remove <session> <claude|codex>
                                             Remove an agent from a session
@@ -7248,6 +7338,8 @@ case "${1:-help}" in
   template)  cmd_template "$@" ;;
   config)    cmd_config "$@" ;;
   agent)     cmd_agent "$@" ;;
+  claude)    cmd_launch_agent "claude" "$@" ;;
+  codex)     cmd_launch_agent "codex" "$@" ;;
   stats)     cmd_stats ;;
   doctor)    cmd_doctor ;;
   web)       cmd_web "$@" ;;
