@@ -3883,7 +3883,12 @@ cmd_yolo() {
   agent_cmd=$(build_agent_cmd "claude" "$worktree_path" "$container_id" "$claude_flags" " \"continue\"")
 
   # Kill current process in agent window and restart with yolo + resume
-  tmux respawn-window -t "$match:agent" -k "${env_prefix}${agent_cmd}"
+  # If the agent window doesn't exist, create it instead
+  if tmux list-windows -t "$match" -F '#W' 2>/dev/null | grep -q '^agent$'; then
+    tmux respawn-window -t "$match:agent" -k "${env_prefix}${agent_cmd}"
+  else
+    tmux new-window -t "$match" -n "agent" "${env_prefix}${agent_cmd}"
+  fi
 
   log "Session '$match' is now in yolo mode — claude resumed with --dangerously-skip-permissions"
 }
