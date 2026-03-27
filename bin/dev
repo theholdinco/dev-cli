@@ -268,16 +268,45 @@ ensure_claude_trust() {
   ) 200>"$claude_json.lock"
 }
 
-# Build env_prefix string for sourcing secrets.
+# Extract env vars from the user's ~/.claude/settings.json "env" section.
+# Returns shell export statements (one per line) for each key-value pair.
+# This ensures settings like CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS are available
+# in the session environment, not just inside Claude Code's process.
+get_claude_settings_env() {
+  local settings_file="$HOME/.claude/settings.json"
+  [ -f "$settings_file" ] || return 0
+  # Output as semicolon-separated export statements on a single line
+  # (safe for tmux command strings)
+  jq -r '.env // {} | to_entries | map("export " + .key + "=" + (.value | @sh)) | join("; ")' "$settings_file" 2>/dev/null || true
+}
+
+# Build env_prefix string for sourcing secrets and Claude settings.
 # secrets.env is the single source of truth for authentication.
+# ~/.claude/settings.json "env" section provides user-configured env vars
+# (e.g. CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS for subagent teams).
 build_env_prefix() {
-  if [ ! -f "$SECRETS_FILE" ]; then
-    echo ""
-    return
+  local parts=""
+  # Source secrets file for auth tokens
+  if [ -f "$SECRETS_FILE" ]; then
+    # Remove stale OAuth credentials file to prevent auth conflicts
+    rm -f "$HOME/.claude/.credentials.json"
+    parts="set -a && source $SECRETS_FILE && set +a"
   fi
-  # Remove stale OAuth credentials file to prevent auth conflicts
-  rm -f "$HOME/.claude/.credentials.json"
-  echo "set -a && source $SECRETS_FILE && set +a && "
+  # Apply env vars from user's Claude settings.json
+  local claude_env
+  claude_env=$(get_claude_settings_env)
+  if [ -n "$claude_env" ]; then
+    if [ -n "$parts" ]; then
+      parts="$parts && $claude_env"
+    else
+      parts="$claude_env"
+    fi
+  fi
+  if [ -n "$parts" ]; then
+    echo "$parts && "
+  else
+    echo ""
+  fi
 }
 
 # Validate Claude auth configuration in secrets.env.
@@ -733,6 +762,26 @@ ensure_devcontainer_json() {
         container_env_json=$(echo "$container_env_json" | jq --arg k "$api_key_name" --arg v "$val" '. + {($k): $v}')
       fi
     done
+  fi
+
+  # Add env vars from user's ~/.claude/settings.json into containerEnv.
+  # This ensures settings like CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS are available
+  # in the container environment for Claude Code and subagents.
+  local claude_settings="$HOME/.claude/settings.json"
+  if [ -f "$claude_settings" ]; then
+    local settings_env
+    settings_env=$(jq -r '.env // {} | to_entries[] | @json' "$claude_settings" 2>/dev/null) || true
+    if [ -n "$settings_env" ]; then
+      while IFS= read -r entry; do
+        local key val
+        key=$(echo "$entry" | jq -r '.key')
+        val=$(echo "$entry" | jq -r '.value')
+        # Don't override explicitly set values (model, effort, API keys)
+        if ! echo "$container_env_json" | jq -e "has(\"$key\")" >/dev/null 2>&1; then
+          container_env_json=$(echo "$container_env_json" | jq --arg k "$key" --arg v "$val" '. + {($k): $v}')
+        fi
+      done <<< "$settings_env"
+    fi
   fi
 
   # If --env requested, build remoteEnv with localEnv references for secrets
