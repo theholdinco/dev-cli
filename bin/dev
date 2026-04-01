@@ -3918,8 +3918,13 @@ cmd_yolo() {
 
   info "Enabling yolo mode for session '$match'..."
 
+  validate_claude_auth || true
+
   # Suppress the skip-permissions confirmation dialog
   [ -z "$container_id" ] && ensure_claude_skip_prompt
+
+  # Pre-trust the worktree so Claude doesn't prompt on relaunch
+  [ -z "$container_id" ] && ensure_claude_trust "$worktree_path"
 
   # Build env prefix for secrets
   local env_prefix=""
@@ -3931,10 +3936,17 @@ cmd_yolo() {
   local agent_cmd
   agent_cmd=$(build_agent_cmd "claude" "$worktree_path" "$container_id" "$claude_flags" " \"continue\"")
 
-  # Kill current process in agent window and restart with yolo + resume
-  # If the agent window doesn't exist, create it instead
-  if tmux list-windows -t "$match" -F '#W' 2>/dev/null | grep -q '^agent$'; then
-    tmux respawn-window -t "$match:agent" -k "${env_prefix}${agent_cmd}"
+  # Find the agent window — check both "agent" (original name) and any window
+  # whose name starts with "agent" (tmux automatic-rename may have changed it)
+  local agent_win=""
+  agent_win=$(tmux list-windows -t "$match" -F '#I:#W' 2>/dev/null | grep -E ':agent(-claude)?$' | head -1 | cut -d: -f1)
+
+  if [ -n "$agent_win" ]; then
+    # Gracefully signal Claude to exit so it can save conversation state,
+    # then wait briefly before hard-killing and respawning
+    tmux send-keys -t "$match:${agent_win}" C-c C-c 2>/dev/null || true
+    sleep 2
+    tmux respawn-window -t "$match:${agent_win}" -k "${env_prefix}${agent_cmd}"
   else
     tmux new-window -t "$match" -n "agent" "${env_prefix}${agent_cmd}"
   fi
