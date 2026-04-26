@@ -4496,11 +4496,6 @@ cmd_agent() {
       match=$(jq -r "keys[] | select(contains(\"$session_name\"))" "$PORT_REGISTRY" | head -1)
       [ -z "$match" ] && die "No session matching '$session_name'"
 
-      # Check if agent type already running
-      if has_agent "$match" "$agent_type"; then
-        die "Agent '$agent_type' is already running in session '$match'"
-      fi
-
       # Check if tmux session is alive
       tmux has-session -t "$match" 2>/dev/null || die "Session '$match' is not running"
 
@@ -4545,8 +4540,16 @@ cmd_agent() {
       fi
       agent_cmd=$(build_agent_cmd "$agent_type" "$worktree_path" "$cid" "$claude_flags")
 
-      # Create new tmux window named agent-<type>
-      tmux new-window -t "$match" -n "agent-${agent_type}" "${env_prefix}${agent_cmd}"
+      # Pick a unique tmux window name so multiple instances of the same agent
+      # can run side-by-side (agent-claude, agent-claude-2, agent-claude-3, ...)
+      local window_name="agent-${agent_type}"
+      local n=2
+      while tmux list-windows -t "$match" -F '#{window_name}' 2>/dev/null | grep -qx "$window_name"; do
+        window_name="agent-${agent_type}-${n}"
+        n=$((n + 1))
+      done
+
+      tmux new-window -t "$match" -n "$window_name" "${env_prefix}${agent_cmd}"
 
       # Update port registry to include new agent in agents array
       local tmp
@@ -4576,10 +4579,18 @@ cmd_agent() {
         die "Agent '$agent_type' is not running in session '$match'"
       fi
 
-      # Kill the specific tmux window (agent-<type>)
-      tmux kill-window -t "$match:agent-${agent_type}" 2>/dev/null || \
-        tmux kill-window -t "$match:agent" 2>/dev/null || \
-        warn "Could not find tmux window for agent-${agent_type}"
+      # Kill all matching tmux windows (agent-<type>, agent-<type>-2, ...)
+      # Also try the legacy plain "agent" window name for the primary agent.
+      local killed=0
+      while IFS= read -r win; do
+        [ -z "$win" ] && continue
+        tmux kill-window -t "$match:$win" 2>/dev/null && killed=$((killed + 1)) || true
+      done < <(tmux list-windows -t "$match" -F '#{window_name}' 2>/dev/null | \
+               grep -E "^agent-${agent_type}(-[0-9]+)?\$" || true)
+      if [ "$killed" -eq 0 ]; then
+        tmux kill-window -t "$match:agent" 2>/dev/null && killed=1 || \
+          warn "Could not find tmux window for agent-${agent_type}"
+      fi
 
       # Update port registry agents array
       local tmp
@@ -4727,8 +4738,16 @@ cmd_launch_agent() {
   local agent_cmd
   agent_cmd=$(build_agent_cmd "$agent_type" "$worktree_path" "$cid" "$claude_flags" "$prompt_arg")
 
-  # Create new tmux window
-  tmux new-window -t "$match" -n "agent-${agent_type}" "${env_prefix}${agent_cmd}"
+  # Pick a unique tmux window name so multiple instances of the same agent
+  # can run side-by-side (agent-claude, agent-claude-2, agent-claude-3, ...)
+  local window_name="agent-${agent_type}"
+  local n=2
+  while tmux list-windows -t "$match" -F '#{window_name}' 2>/dev/null | grep -qx "$window_name"; do
+    window_name="agent-${agent_type}-${n}"
+    n=$((n + 1))
+  done
+
+  tmux new-window -t "$match" -n "$window_name" "${env_prefix}${agent_cmd}"
 
   # Update port registry agents array
   if ! has_agent "$match" "$agent_type"; then
