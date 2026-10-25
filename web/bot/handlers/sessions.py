@@ -155,6 +155,7 @@ async def cmd_kill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+@authorized
 async def callback_kill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle kill confirmation/cancel callback from inline keyboard."""
     query = update.callback_query

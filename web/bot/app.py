@@ -6,7 +6,14 @@ import sys
 import traceback
 
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    ApplicationHandlerStop,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    TypeHandler,
+)
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -15,6 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from core import GLOBAL_CONFIG
+from bot.auth import deny, get_allowed_ids, is_authorized
 from bot.handlers.sessions import (
     cmd_start,
     cmd_ls,
@@ -48,11 +56,18 @@ def get_bot_token() -> str:
         sys.exit(1)
 
 
-def main():
-    """Build and run the Telegram bot with polling."""
-    token = get_bot_token()
+async def reject_unauthorized(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Runs before every other handler; stops updates from chats not in the allowlist."""
+    if not is_authorized(update):
+        await deny(update)
+        raise ApplicationHandlerStop
 
-    app = ApplicationBuilder().token(token).build()
+
+def register_handlers(app):
+    """Attach the allowlist gate and all command handlers to the application."""
+    # Allowlist gate (group -1 runs first). Each handler is also decorated with
+    # @authorized, so a handler added later without the decorator stays protected.
+    app.add_handler(TypeHandler(Update, reject_unauthorized), group=-1)
 
     # Session management
     app.add_handler(CommandHandler("start", cmd_start))
@@ -90,6 +105,24 @@ def main():
 
     # Inline keyboard callbacks (kill confirmation)
     app.add_handler(CallbackQueryHandler(callback_kill, pattern=r"^kill_"))
+
+
+def main():
+    """Build and run the Telegram bot with polling."""
+    token = get_bot_token()
+
+    allowed = get_allowed_ids()
+    if not allowed:
+        logger.warning(
+            "telegram.allowed_chat_ids in %s is empty or unreadable: the bot will reject "
+            "every message until you add your chat id there.",
+            GLOBAL_CONFIG,
+        )
+    else:
+        logger.info("Bot will answer %d allowed chat(s).", len(allowed))
+
+    app = ApplicationBuilder().token(token).build()
+    register_handlers(app)
 
     # Error handler
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):

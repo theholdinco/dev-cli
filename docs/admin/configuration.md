@@ -124,6 +124,18 @@ dev projects
 
 Most settings are managed through `dev setup-account` and individual command flags rather than editing this file directly.
 
+### Web dashboard and Telegram bot access
+
+Both can create agent sessions and send prompts to agents, so access is restricted by default:
+
+- **Telegram bot:** only chats listed in `telegram.allowed_chat_ids` can use it. If the list is empty, missing or the config can't be read, the bot rejects every message and logs the rejected chat id (`dev services` and `dev bot start` warn about this).
+
+  ```bash
+  jq '.telegram.allowed_chat_ids = [123456789]' ~/.config/dev-cli/config.json > /tmp/cfg.json && mv /tmp/cfg.json ~/.config/dev-cli/config.json
+  ```
+
+- **Web dashboard:** it has no login, so it listens on this machine's Tailscale IP (`web.bind: "auto"`, the default), or on `127.0.0.1` when Tailscale isn't connected. Set `web.bind` to a specific address to override. `"0.0.0.0"` restores the old behaviour and exposes the dashboard on every interface, so only use it behind a firewall. The systemd unit records the address when you run `dev services install`. Re-run it after changing `web.bind` or connecting Tailscale.
+
 ## Stale Session Cleanup
 
 Sessions that have been idle for a long time waste slots and ports.

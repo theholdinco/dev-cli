@@ -76,7 +76,8 @@ DEFAULT_CONFIG='{
     "notify_delay_seconds": 30
   },
   "web": {
-    "port": 8080
+    "port": 8080,
+    "bind": "auto"
   },
   "ghost": {
     "linked_dirs": []
@@ -420,6 +421,52 @@ get_ip() {
     tailscale ip -4 2>/dev/null || hostname -I | awk '{print $1}'
   else
     hostname -I | awk '{print $1}'
+  fi
+}
+
+# Address the web dashboard listens on. The dashboard has no login and can start
+# agents, so by default it listens only on this machine's Tailscale IPv4 address,
+# or on 127.0.0.1 when Tailscale is not installed or not connected.
+# Set web.bind in config.json to an explicit address to override (e.g. "0.0.0.0").
+get_web_bind() {
+  local bind
+  bind=$(get_config_value '.web.bind' 'auto')
+  if [ -n "$bind" ] && [ "$bind" != "auto" ]; then
+    echo "$bind"
+    return
+  fi
+  bind=""
+  if command -v tailscale &>/dev/null; then
+    bind=$(tailscale ip -4 2>/dev/null | head -n1 || true)
+  fi
+  echo "${bind:-127.0.0.1}"
+}
+
+# host:port for gunicorn --bind (IPv6 literals need brackets)
+web_bind_addr() {
+  local host="$1" port="$2"
+  if [[ "$host" == *:* && "$host" != \[* ]]; then
+    echo "[$host]:$port"
+  else
+    echo "$host:$port"
+  fi
+}
+
+# Host to show in dashboard URLs for a given bind address
+web_url_host() {
+  case "$1" in
+    0.0.0.0|::|"[::]") get_ip 2>/dev/null || echo "localhost" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# Warn when the bot has no allowlist (it then rejects every message)
+warn_if_no_bot_allowlist() {
+  local count
+  count=$(jq -r '(.telegram.allowed_chat_ids // []) | length' "$GLOBAL_CONFIG" 2>/dev/null || echo "0")
+  if [ -z "$count" ] || [ "$count" = "0" ]; then
+    warn "telegram.allowed_chat_ids is empty: the bot will reject every message until you add your chat id:"
+    echo "  jq '.telegram.allowed_chat_ids = [YOUR_CHAT_ID]' $GLOBAL_CONFIG > /tmp/cfg.json && mv /tmp/cfg.json $GLOBAL_CONFIG"
   fi
 }
 
@@ -4792,10 +4839,12 @@ cmd_web() {
       if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
         die "Web dashboard already running (PID $(cat "$pid_file"))"
       fi
-      info "Starting web dashboard on port $port..."
+      local bind
+      bind=$(get_web_bind)
+      info "Starting web dashboard on $(web_bind_addr "$bind" "$port")..."
       cd "$WEB_DIR"
       PYTHONPATH="$WEB_DIR" "$venv_dir/bin/gunicorn" \
-        --bind "0.0.0.0:$port" \
+        --bind "$(web_bind_addr "$bind" "$port")" \
         --workers 2 \
         --timeout 120 \
         --pid "$pid_file" \
@@ -4805,9 +4854,10 @@ cmd_web() {
         "dashboard.app:create_app()"
       sleep 1
       if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
-        local ip
-        ip=$(get_ip 2>/dev/null || echo "localhost")
-        log "Web dashboard running at http://${ip}:${port}"
+        log "Web dashboard running at http://$(web_bind_addr "$(web_url_host "$bind")" "$port")"
+        if [ "$bind" = "127.0.0.1" ]; then
+          info "Listening on loopback only (Tailscale not connected). Restart it after 'tailscale up', or set web.bind in $GLOBAL_CONFIG"
+        fi
       else
         die "Failed to start web dashboard. Check $LOG_DIR/web-error.log"
       fi
@@ -4834,10 +4884,8 @@ cmd_web() {
       if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
         local port
         port=$(get_config_value '.web.port' '8080')
-        local ip
-        ip=$(get_ip 2>/dev/null || echo "localhost")
         echo -e "${GREEN}●${NC} Web dashboard is running (PID $(cat "$pid_file"))"
-        echo -e "  URL: http://${ip}:${port}"
+        echo -e "  URL: http://$(web_bind_addr "$(web_url_host "$(get_web_bind)")" "$port")"
       else
         echo -e "${RED}●${NC} Web dashboard is not running"
         [ -f "$pid_file" ] && rm -f "$pid_file"
@@ -4869,6 +4917,7 @@ cmd_bot() {
       if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
         die "Telegram bot already running (PID $(cat "$pid_file"))"
       fi
+      warn_if_no_bot_allowlist
       info "Starting Telegram bot..."
       cd "$WEB_DIR"
       PYTHONPATH="$WEB_DIR" nohup "$venv_dir/bin/python" -m bot.app \
@@ -4990,9 +5039,9 @@ HOOKS_JSON
         echo "  jq '.telegram.bot_token = \"YOUR_TOKEN\"' $GLOBAL_CONFIG > /tmp/cfg.json && mv /tmp/cfg.json $GLOBAL_CONFIG"
       fi
       local chat_ids
-      chat_ids=$(jq -r '.telegram.allowed_chat_ids | length' "$GLOBAL_CONFIG" 2>/dev/null || echo "0")
+      chat_ids=$(jq -r '(.telegram.allowed_chat_ids // []) | length' "$GLOBAL_CONFIG" 2>/dev/null || echo "0")
       if [ "$chat_ids" = "0" ]; then
-        warn "No chat_ids configured. Set them with:"
+        warn "No chat_ids configured (the Telegram bot rejects every message until you add one). Set them with:"
         echo "  jq '.telegram.allowed_chat_ids = [YOUR_CHAT_ID]' $GLOBAL_CONFIG > /tmp/cfg.json && mv /tmp/cfg.json $GLOBAL_CONFIG"
       fi
       ;;
@@ -5096,13 +5145,20 @@ cmd_services() {
   local run_home="$HOME"
 
   _write_service_files() {
-    local web_port
+    local web_port web_bind
     web_port=$(get_config_value '.web.port' '8080')
+    # The address is resolved now and written into the unit (see get_web_bind)
+    web_bind=$(get_web_bind)
+    info "Web dashboard will listen on $(web_bind_addr "$web_bind" "$web_port") (change with web.bind in $GLOBAL_CONFIG)"
+    if [ "$web_bind" = "127.0.0.1" ]; then
+      warn "Tailscale is not connected, so the dashboard is bound to loopback only. Run 'dev services install' again after 'tailscale up'."
+    fi
 
     sudo tee "$service_dir/dev-web.service" > /dev/null << EOF
 [Unit]
 Description=dev-cli Web Dashboard
-After=network.target
+After=network-online.target tailscaled.service
+Wants=network-online.target
 
 [Service]
 Type=exec
@@ -5110,7 +5166,7 @@ User=$run_user
 WorkingDirectory=$WEB_DIR
 Environment=PYTHONPATH=$WEB_DIR
 Environment=HOME=$run_home
-ExecStart=$venv_dir/bin/gunicorn --bind 0.0.0.0:$web_port --workers 2 --timeout 120 "dashboard.app:create_app()"
+ExecStart=$venv_dir/bin/gunicorn --bind $(web_bind_addr "$web_bind" "$web_port") --workers 2 --timeout 120 "dashboard.app:create_app()"
 Restart=on-failure
 RestartSec=5
 
@@ -5209,6 +5265,7 @@ EOF
       if [ -n "$token" ]; then
         sudo systemctl enable dev-bot.service
         log "dev-bot service installed and enabled"
+        warn_if_no_bot_allowlist
       else
         info "Telegram bot not enabled (no bot_token configured)"
         info "Set telegram.bot_token in config, then run: dev services install"
@@ -5283,9 +5340,7 @@ EOF
       if systemctl is-active dev-web.service &>/dev/null; then
         local web_port
         web_port=$(get_config_value '.web.port' '8080')
-        local ip
-        ip=$(get_ip 2>/dev/null || echo "localhost")
-        echo -e "  ${GREEN}●${NC} Web dashboard  (http://${ip}:${web_port})"
+        echo -e "  ${GREEN}●${NC} Web dashboard  (http://$(web_bind_addr "$(web_url_host "$(get_web_bind)")" "$web_port"))"
       else
         echo -e "  ${RED}●${NC} Web dashboard"
       fi
@@ -7260,7 +7315,8 @@ cmd_help() {
 
   WEB & BOT
     dev web setup                           Install Python deps for dashboard
-    dev web start [port]                    Start web dashboard (default: 8080)
+    dev web start [port]                    Start web dashboard (default: 8080, on the Tailscale IP;
+                                            set web.bind in config.json to change)
     dev web stop                            Stop web dashboard
     dev web status                          Show dashboard status
     dev bot setup                           Install Python deps for bot
